@@ -7,4 +7,4 @@
 /*.dylib
 /*.lib
 /*.a
-http-service
+/mail-service
