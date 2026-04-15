@@ -1,0 +1,466 @@
+#include "http.h"
+#include "basic.h"
+
+#include <ctype.h>
+#include <errno.h>
+#include <pthread.h>
+#include <stdlib.h>
+#include <time.h>
+#include <unistd.h>
+
+// For hashtable
+bool header_key_eq(void *a, void *b) {
+  String *sa = a;
+  String *sb = b;
+  return sv_equal_ignore_case(*sa, *sb);
+}
+
+// hash: https://theartincode.stanis.me/008-djb2/
+size_t header_key_hash(size_t capacity, void *a) {
+  String *s = a;
+  size_t hash = 5381;
+  for (size_t i = 0; i < s->length; i++) {
+    hash = ((hash << 5) + hash) + (unsigned char)(tolower(s->data[i]));
+  }
+  return hash % capacity;
+}
+
+HashTable http_headers_init(void) {
+  return hash_table_init(HTTP_HEADER_CAPACITY, header_key_eq, header_key_hash);
+}
+
+void http_headers_set(HashTable *headers, String key, String value) {
+  assert(headers != NULL);
+  String *key_ptr = malloc(sizeof(String));
+  *key_ptr = key;
+
+  HeaderValues *out;
+  if (hash_table_get(headers, key_ptr, (void **)&out)) {
+    array_append(out, value);
+  } else {
+    HeaderValues *values = malloc(sizeof(HeaderValues));
+    array_append(values, value);
+    hash_table_set(headers, key_ptr, values);
+  }
+}
+
+HeaderValues *http_headers_get(const HashTable *headers, String key) {
+  assert(headers != NULL);
+  assert(key.length > 0);
+
+  void *value = NULL;
+  if (hash_table_get(headers, &key, &value)) {
+    return (HeaderValues *)value;
+  }
+  return NULL;
+}
+
+void http_headers_free(HashTable *headers) {
+  assert(headers != NULL);
+  if (headers->entries != NULL) {
+    for (size_t i = 0; i < headers->capacity; i++) {
+      HashTableEntry entry = headers->entries[i];
+      if (entry.key != NULL) {
+        free(entry.key);
+        free(entry.value);
+      }
+    }
+  }
+  hash_table_free(headers);
+}
+
+HttpServerInitOptions http_server_init_defaults(void) {
+  return (HttpServerInitOptions){
+      .port = HTTP_DEFAULT_PORT,
+      .backlog = HTTP_BACKLOG,
+      .header_capacity = HTTP_HEADER_CAPACITY,
+  };
+}
+Error http_server_init(HttpServer *server) {
+  return http_server_init_opts(server, http_server_init_defaults());
+}
+
+Error http_server_init_opts(HttpServer *server, HttpServerInitOptions opt) {
+  assert(server != NULL);
+
+  server->sock_fd = socket(AF_INET, SOCK_STREAM, 0);
+  if (server->sock_fd < 0) {
+    return errorf("socket failed: %s", strerror(errno));
+  }
+
+  int socket_options = 1;
+#ifdef SO_REUSEADDR
+  if (setsockopt(server->sock_fd, SOL_SOCKET, SO_REUSEADDR, &socket_options,
+                 sizeof(socket_options)) < 0) {
+    return errorf("setsockopt failed: %s", strerror(errno));
+  }
+#endif
+
+#ifdef SO_REUSEPORT
+  if (setsockopt(server->sock_fd, SOL_SOCKET, SO_REUSEPORT, &socket_options,
+                 sizeof(socket_options)) < 0) {
+    return errorf("setsockopt failed: %s", strerror(errno));
+  }
+#endif
+
+  server->addr.sin_family = AF_INET;
+  server->addr.sin_addr.s_addr = INADDR_ANY;
+  server->addr.sin_port = htons(opt.port);
+
+  if (bind(server->sock_fd, (struct sockaddr *)&server->addr,
+           sizeof(server->addr)) < 0) {
+    return errorf("bind failed: %s", strerror(errno));
+  }
+
+  return ErrorNil;
+}
+
+#define CRLF "\r\n"
+
+void http_response_write(const int client_fd, const char *buffer, const size_t length) {
+  assert(buffer != NULL);
+  assert(length > 0);
+
+  size_t total_written = 0;
+  while (total_written < length) {
+    const ssize_t n = write(client_fd, buffer + total_written, length - total_written);
+    if (n < 0) {
+      if (errno == EAGAIN || errno == EINTR || errno == EWOULDBLOCK) {
+        continue;
+      }
+      ERROR("write failed: %s", strerror(errno));
+      break;
+    }
+    if (n == 0) {
+      break;
+    }
+    total_written += n;
+  }
+}
+
+typedef enum {
+  HttpErrorNil,
+  HttpErrorEOF,
+  HttpErrorConnectionReset,
+  HttpErrorRead,
+  HttpErrorParse,
+  HttpErrorUnknown,
+} HttpError;
+
+String http_error_to_string(const HttpError err) {
+  switch (err) {
+  case HttpErrorNil:
+    return SV("nil");
+  case HttpErrorEOF:
+    return SV("eof");
+  case HttpErrorConnectionReset:
+    return SV("connection closed");
+  case HttpErrorRead:
+    return SV("read error");
+  case HttpErrorParse:
+    return SV("parse error");
+  default:
+    return SV("unknown");
+  }
+}
+
+String http_request_to_string(const HttpRequest request) {
+  return tprintf(SV_Fmt " " SV_Fmt " " SV_Fmt " ",
+    SV_Arg(request.method), SV_Arg(request.path), SV_Arg(request.proto));
+}
+
+HttpError http_parse_request(const int client, StringBuilder *sb,
+                             HttpRequest *request) {
+  assert(request != NULL);
+
+  ssize_t header_end;
+  char *buffer = talloc(HTTP_READ_BUFFER_SIZE); // Temp allocated buffer
+
+  while (true) {
+    const ssize_t n = read(client, buffer, HTTP_READ_BUFFER_SIZE);
+    if (n < 0) {
+      if (errno == ECONNRESET) {
+        return HttpErrorConnectionReset;
+      }
+      return HttpErrorRead;
+    }
+    if (n == 0) {
+      return HttpErrorEOF;
+    }
+    sb_push_sv(sb, SV2(buffer, n));
+    header_end = sv_find(sb_to_sv(sb), CRLF CRLF);
+    if (header_end != -1) {
+      break;
+    }
+  }
+
+  String request_str = sb_to_sv(sb);
+
+  // Parsing the request
+  StringPair p0 = sv_split_str(request_str, CRLF); // (status_line vs rest)
+  StringPair p1 = sv_split_delim(p0.first, ' ');   // (method vs rest)
+  StringPair p2 = sv_split_delim(p1.second, ' ');  // (path vs rest)
+  StringPair p3 = sv_split_delim(p2.second, ' ');  // (proto vs rest)
+  if (p0.first.length == 0 || p1.first.length == 0 || p2.first.length == 0) {
+    return HttpErrorParse;
+  }
+
+  request->request_id = random_id();
+  request->proto = p3.first;
+  request->method = p1.first;
+  request->path = p2.first;
+  request->headers = http_headers_init();
+
+  // Parsing the headers
+  size_t content_length = 0;
+  String sv = p0.second;
+  while (sv.length > 0) {
+    StringPair header_line_headers_pair = sv_split_str(sv, CRLF);        // header_line vs rest
+    StringPair header_pair = sv_split_delim(header_line_headers_pair.first, ':'); // header_key vs header_value
+
+    String key = sv_trim_left(header_pair.first);
+    String value = sv_trim_left(header_pair.second);
+    if (key.length == 0 || value.length == 0) {
+      break;
+    }
+
+    if (sv_equal(key, SV("Content-Length"))) {
+      char* endptr = NULL;
+      content_length = sv_to_long(value, &endptr);
+      if (endptr != value.data + value.length) {
+        ERROR("invalid content length");
+        return  HttpErrorParse;
+      }
+    }
+
+    http_headers_set(&request->headers, key, value);
+    sv = header_line_headers_pair.second;
+  }
+
+  // Read body if not read yet
+  while (sb->length < (header_end + 4 + content_length)) {
+    size_t to_read = header_end + 4 + content_length - sb->length;
+    if (to_read > HTTP_READ_BUFFER_SIZE) {
+      to_read = HTTP_READ_BUFFER_SIZE;
+    }
+    ssize_t n = read(client, buffer, to_read);
+    if (n < 0) {
+      if (errno == ECONNRESET || errno == EPIPE) {
+        return HttpErrorConnectionReset;
+      }
+      return HttpErrorRead;
+    }
+    if (n == 0) {
+      return HttpErrorEOF;
+    }
+    sb_push_sv(sb, SV2(buffer, n));
+  }
+  request->body = SV2(sb->data + header_end + 4, content_length);
+  request->raw_request = sb_to_sv(sb);
+
+  return 0;
+}
+
+String http_status_code_to_string(const int status_code) {
+  switch (status_code) {
+  case 200:
+    return SV("OK");
+  case 201:
+    return SV("Created");
+  case 204:
+    return SV("No Content");
+  case 301:
+    return SV("Moved Permanently");
+  case 400:
+    return SV("Bad Request");
+  case 404:
+    return SV("Not Found");
+  case 405:
+    return SV("Method Not Allowed");
+  case 500:
+    return SV("Internal Server Error");
+  default:
+    return SV("Unknown");
+  }
+}
+
+char *http_date(void) {
+  time_t t;
+  time(&t);
+  struct tm *tm = gmtime(&t);
+  static char buf[40];
+  strftime(buf, sizeof(buf), "%a, %d %b %Y %H:%M:%S GMT", tm);
+  return buf;
+}
+
+void http_response_encode(const HttpResponse *response, StringBuilder *sb) {
+  sb_push_str(sb, "HTTP/1.1 ");
+  sb_push_long(sb, response->status_code);
+  sb_push_str(sb, " ");
+  sb_push_sv(sb, http_status_code_to_string(response->status_code));
+  sb_push_str(sb, CRLF);
+  sb_push_str(sb, "Content-Length: ");
+  sb_push_long(sb, (long)response->body.length);
+  sb_push_str(sb, CRLF);
+  if (response->body.length > 0) {
+    sb_push_str(sb, "Content-Type: ");
+    sb_push_sv(sb, response->content_type);
+    sb_push_str(sb, CRLF);
+  }
+  if (response->keep_alive) {
+    sb_push_str(sb, "Connection: keep-alive");
+    sb_push_str(sb, CRLF);
+  } else {
+    sb_push_str(sb, "Connection: close");
+    sb_push_str(sb, CRLF);
+  }
+  sb_push_str(sb, "Date: ");
+  sb_push_str(sb, http_date());
+  sb_push_str(sb, CRLF);
+  for (int i = 0; i < response->headers.capacity; i++) {
+    HashTableEntry entry = response->headers.entries[i];
+    if (entry.key != NULL) {
+      sb_push_sv(sb, *(String *)entry.key);
+      sb_push_str(sb, ": ");
+      const HeaderValues *values = (HeaderValues *)entry.value;
+      if (values != NULL) {
+        for (int j = 0; j < values->length; j++) {
+          sb_push_sv(sb, values->items[j]);
+          if (j < values->length-1) sb_push_char(sb, ',');
+        }
+      }
+      sb_push_str(sb, CRLF);
+    }
+  }
+  sb_push_str(sb, CRLF);
+  if (response->body.length > 0) {
+    sb_push_sv(sb, response->body);
+  }
+}
+
+typedef struct {
+  int client_fd;
+  HttpListenCallback callback;
+} ClientThreadArgs;
+
+void *handle_client(void *arg) {
+  ClientThreadArgs *args = arg;
+  const int client_fd = args->client_fd;
+  const HttpListenCallback callback = args->callback;
+  free(arg);
+
+  StringBuilder request_sb = {0};
+  StringBuilder response_sb = {0};
+
+  sb_resize(&request_sb, HTTP_READ_BUFFER_SIZE);
+  sb_resize(&response_sb, HTTP_READ_BUFFER_SIZE);
+
+  while (true) {
+    request_sb.length = 0;
+    response_sb.length = 0;
+
+    HttpRequest request = {0};
+    const HttpError err = http_parse_request(client_fd, &request_sb, &request);
+    if (err == HttpErrorEOF || err == HttpErrorConnectionReset) {
+      break;
+    }
+    if (err != HttpErrorNil) {
+      ERROR("http parse request failed: " SV_Fmt "\n", SV_Arg(http_error_to_string(err)));
+      break;
+    }
+
+    INFO("request received: " SV_Fmt, SV_Arg(http_request_to_string(request)));
+
+    HttpResponse response = callback(&request);
+
+    http_response_encode(&response, &response_sb);
+    http_response_write(client_fd, response_sb.data, response_sb.length);
+
+    // Cleanup
+    if (response.free_body_after_use)
+      free(response.body.data);
+    http_headers_free(&response.headers);
+
+    if (!response.keep_alive) {
+      break;
+    }
+  }
+
+  close(client_fd);
+  sb_free(&request_sb);
+  sb_free(&response_sb);
+  return NULL;
+}
+
+Error http_server_listen(const HttpServer *server, const HttpListenCallback callback) {
+  assert(server != NULL);
+  assert(server->sock_fd > 0);
+  assert(callback != NULL);
+
+  if (listen(server->sock_fd, HTTP_BACKLOG) < 0) {
+    return errorf("listen failed: %s\n", strerror(errno));
+  }
+
+  INFO("server started");
+  while (true) {
+    const int client_fd = accept(server->sock_fd, NULL, NULL);
+    if (client_fd < 0) {
+      ERROR("accept failed: %s\n", strerror(errno));
+      continue;
+    }
+
+    ClientThreadArgs *arg = malloc(sizeof(ClientThreadArgs));
+    arg->client_fd = client_fd;
+    arg->callback = callback;
+
+    pthread_t tid;
+    if (pthread_create(&tid, NULL, handle_client, arg) != 0) {
+      free(arg);
+      close(client_fd);
+      ERROR("pthread_create failed: %s\n", strerror(errno));
+      continue;
+    }
+
+    pthread_detach(tid);
+  }
+
+  assert(false && "unreachable");
+}
+
+void http_server_free(const HttpServer *server) { close(server->sock_fd); }
+
+HttpResponse http_response_init(int status_code) {
+  HttpResponse response = {0};
+  response.headers = http_headers_init();
+  response.status_code = status_code;
+  response.keep_alive = true;
+  response.free_body_after_use = false;
+  return response;
+}
+
+HttpResponse http_json_response(const int status, JsonValue *json) {
+  HttpResponse response = http_response_init(status);
+  response.content_type = SV("application/json");
+
+  StringBuilder sb = {0};
+  json_encode(*json, &sb, 0);
+  response.body = sb_to_sv(&sb);
+  response.free_body_after_use = true;
+  json_free(json);
+
+  return response;
+}
+
+HttpResponse http_text_response(const int status, String body) {
+  HttpResponse response = http_response_init(status);
+  response.content_type = SV("text/plain");
+  response.body = body;
+  response.free_body_after_use = false;
+  return response;
+}
+
+HttpResponse http_status_response(const int status) {
+  HttpResponse response = http_response_init(status);
+  response.free_body_after_use = false;
+  return response;
+}
