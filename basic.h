@@ -92,6 +92,7 @@ StringBuilder sb_clone(const StringBuilder* sb);
 bool sv_equal(String s1, String s2);
 bool sv_equal_ignore_case(String s1, String s2);
 ssize_t sv_find(String sv, const char* str);
+ssize_t sv_rev_find(String sv, const char* str);
 String sv_trim_left(String sv);
 String sv_trim_right(String sv);
 String sv_trim(String sv);

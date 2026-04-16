@@ -14,7 +14,10 @@ int main(int argc, char** argv) {
   try(config_load("config.json"));
 
   smtp_send((Email){
-    .from = SV("ayushskywalker@gmail.com")
+    .from    = SV("me@ayush-kumar.com"),
+    .to      = SV("test@localhost"),
+    .subject = SV("Hello"),
+    .body    = SV("Hello from my SMTP client!"),
   });
 
   HttpServer server = {0};

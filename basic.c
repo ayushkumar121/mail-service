@@ -242,6 +242,21 @@ ssize_t sv_find(const String sv, const char *str) {
   return -1;
 }
 
+ssize_t sv_rev_find(const String sv, const char *str) {
+  ssize_t i = 0;
+  const size_t n = strlen(str);
+
+  for (i = sv.length - 1; i >= 0; i--) {
+    if (sv.data[i] == str[0] && i + n <= sv.length) {
+      if (memcmp(str, &sv.data[i], n) == 0) {
+        return i;
+      }
+    }
+  }
+
+  return -1;
+}
+
 StringPair sv_split_str(String sv, const char *str) {
   StringPair result = {0};
 
