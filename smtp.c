@@ -30,7 +30,10 @@ String get_mail_dir() {
     static String maildir;
     if (maildir.length == 0) {
         maildir = config_get_string(SV("server.smtp.dir"), SMTP_DEFAULT_DIR);
-        make_directory(sv_to_tmp_c(maildir));
+    }
+    const char* maildir_cstr = sv_to_tmp_c(maildir);
+    if (!file_exists(maildir_cstr)) {
+        make_directory(maildir_cstr);
     }
     return maildir;
 }
@@ -280,6 +283,8 @@ Error smtp_server_init(SmtpServer* server) {
         return errorf("bind failed: %s", strerror(errno));
     }
 
+    INFO("Setting up maildir: "SV_Fmt, SV_Arg(get_mail_dir()));
+
     return ErrorNil;
 }
 
@@ -353,8 +358,12 @@ static void* handle_client(void* p) {
             const StringPair pair = sv_split_delim(rest, '<');
             rcpt_to = sv_clone(sv_split_delim(pair.second, '>').first);
             state = SMTP_STATE_RCPT_TO;
-            smtp_write(&conn, SV("250 OK"));
 
+            // TODO: reject emails if username is not found
+            String path = tprintf(SV_Fmt "/" SV_Fmt "/inbox", SV_Arg(get_mail_dir()), SV_Arg(rcpt_to));
+            if (!file_exists(path.data)) make_directory(path.data);
+
+            smtp_write(&conn, SV("250 OK"));
         } else if (sv_equal_ignore_case(cmd, SV("DATA"))) {
             state = SMTP_STATE_DATA;
             smtp_write(&conn, SV("354 Start input, end with <CRLF>.<CRLF>"));
@@ -366,7 +375,10 @@ static void* handle_client(void* p) {
             String body = sv_clone(sb_to_sv(&conn.read_buf));
             body.length -= strlen(CRLF "." CRLF);
 
-            const String filename = tprintf(SV_Fmt"/%s.eml", SV_Arg(get_mail_dir()), sv_to_tmp_c(random_id()));
+            String filename = tprintf(SV_Fmt "/" SV_Fmt "/inbox/%s.eml",
+                SV_Arg(get_mail_dir()),
+                SV_Arg(rcpt_to),
+                sv_to_tmp_c(random_id()));
             write_entire_file(filename.data, body);
 
             smtp_write(&conn, SV("250 OK queued"));
