@@ -35,7 +35,7 @@ typedef struct {
 
 typedef HttpResponse (*HttpListenCallback)(const HttpRequest *);
 
-#define HTTP_DEFAULT_PORT 8000
+#define HTTP_DEFAULT_PORT 8080
 #define HTTP_BACKLOG 1024
 #define HTTP_HEADER_CAPACITY 20
 #define HTTP_READ_BUFFER_SIZE 512
@@ -54,8 +54,6 @@ typedef struct {
 } HttpServerInitOptions;
 
 Error http_server_init(HttpServer *server);
-HttpServerInitOptions http_server_init_defaults(void);
-Error http_server_init_opts(HttpServer *server, HttpServerInitOptions options);
 Error http_server_listen(const HttpServer *server, HttpListenCallback callback);
 void http_server_free(const HttpServer *server);
 

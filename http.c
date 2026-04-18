@@ -8,6 +8,8 @@
 #include <time.h>
 #include <unistd.h>
 
+#include "config.h"
+
 // For hashtable
 bool header_key_eq(void *a, void *b) {
   String *sa = a;
@@ -77,10 +79,6 @@ HttpServerInitOptions http_server_init_defaults(void) {
   };
 }
 Error http_server_init(HttpServer *server) {
-  return http_server_init_opts(server, http_server_init_defaults());
-}
-
-Error http_server_init_opts(HttpServer *server, HttpServerInitOptions opt) {
   assert(server != NULL);
 
   server->sock_fd = socket(AF_INET, SOCK_STREAM, 0);
@@ -103,9 +101,10 @@ Error http_server_init_opts(HttpServer *server, HttpServerInitOptions opt) {
   }
 #endif
 
+  int port = config_get_int(SV("server.http.port"), HTTP_DEFAULT_PORT);
   server->addr.sin_family = AF_INET;
   server->addr.sin_addr.s_addr = INADDR_ANY;
-  server->addr.sin_port = htons(opt.port);
+  server->addr.sin_port = htons(port);
 
   if (bind(server->sock_fd, (struct sockaddr *)&server->addr,
            sizeof(server->addr)) < 0) {
@@ -325,7 +324,7 @@ void http_response_encode(const HttpResponse *response, StringBuilder *sb) {
       const HeaderValues *values = (HeaderValues *)entry.value;
       if (values != NULL) {
         for (int j = 0; j < values->length; j++) {
-          sb_push_sv(sb, values->items[j]);
+          sb_push_sv(sb, values->data[j]);
           if (j < values->length-1) sb_push_char(sb, ',');
         }
       }
@@ -343,7 +342,7 @@ typedef struct {
   HttpListenCallback callback;
 } ClientThreadArgs;
 
-void *handle_client(void *arg) {
+static void *handle_client(void *arg) {
   ClientThreadArgs *args = arg;
   const int client_fd = args->client_fd;
   const HttpListenCallback callback = args->callback;

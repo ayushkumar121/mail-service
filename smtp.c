@@ -7,10 +7,23 @@
 #include <arpa/inet.h>
 #include <sys/socket.h>
 #include <netdb.h>
+#include <pthread.h>
 #include <unistd.h>
 
+#include "config.h"
+
 #define CRLF "\r\n"
-#define SMTP_SOCKET_READ_TIMEOUT 5
+
+#define SMTP_DEFAULT_PORT 25
+#define SMTP_SOCKET_BACKLOG 1024
+
+String get_local_host() {
+    static String host;
+    if (host.length == 0) {
+        host = config_get_string(SV("server.host"), SV("localhost"));
+    }
+    return host;
+}
 
 Error smtp_lookup_server(String domain, StringBuilder* host_smtp_server) {
     const char* domain_cstr = sv_to_tmp_c(domain);
@@ -37,24 +50,15 @@ Error smtp_lookup_server(String domain, StringBuilder* host_smtp_server) {
 
 typedef struct {
     int sock_fd;
-    String host;
-    int port;
     StringBuilder read_buf;
     StringBuilder write_buf;
 } SmtpConnection;
 
-SmtpConnection smtp_connection_init(String host, int port) {
-    return (SmtpConnection){
-        .host = host,
-        .port = port,
-    };
-}
-
-Error smtp_connect(SmtpConnection* conn) {
+Error smtp_connect(SmtpConnection* conn, String host, int port) {
     assert(conn != NULL);
 
-    char* host_cstr = sv_to_tmp_c(conn->host);
-    char* port_cstr = tprintf("%d", conn->port).data;
+    char* host_cstr = sv_to_tmp_c(host);
+    char* port_cstr = tprintf("%d", port).data;
 
     struct addrinfo hints = {0};
     hints.ai_family = AF_INET;
@@ -62,7 +66,7 @@ Error smtp_connect(SmtpConnection* conn) {
 
     struct addrinfo* res;
     if (getaddrinfo(host_cstr, port_cstr, &hints, &res) != 0) {
-        return errorf("getaddrinfo failed for " SV_Fmt ": %s", SV_Arg(conn->host), strerror(errno));
+        return errorf("getaddrinfo failed for " SV_Fmt ": %s", SV_Arg(host), strerror(errno));
     }
 
     conn->sock_fd = socket(res->ai_family, res->ai_socktype, res->ai_protocol);
@@ -73,16 +77,11 @@ Error smtp_connect(SmtpConnection* conn) {
 
     if (connect(conn->sock_fd, res->ai_addr, res->ai_addrlen) < 0) {
         freeaddrinfo(res);
-        return errorf("connect failed to " SV_Fmt ":%d : %s", SV_Arg(conn->host), conn->port,
+        return errorf("connect failed to " SV_Fmt ": %d:%s", SV_Arg(host), port,
                       strerror(errno));
     }
 
-    struct timeval tv = { .tv_sec = SMTP_SOCKET_READ_TIMEOUT, .tv_usec = 0 };
-    if (setsockopt(conn->sock_fd, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv)) < 0) {
-        return errorf("setsockopt failed: %s", strerror(errno));
-    }
-
-    DEBUG("Connected to: "SV_Fmt" %d", SV_Arg(conn->host), conn->port);
+    DEBUG("Connected to: "SV_Fmt" %d", SV_Arg(host), port);
 
     freeaddrinfo(res);
     return ErrorNil;
@@ -162,45 +161,44 @@ Error smtp_expect_response(SmtpConnection* conn, int expected) {
     return ErrorNil;
 }
 
-Error smtp_send(const Email email) {
+Error smtp_send_email(const Email email) {
     Error err;
     const String domain = sv_split_delim(email.to, '@').second;
 
     String smtp_server;
-    int smtp_port;
+    int smtp_port = 25;
 
     if (sv_equal(domain, SV("localhost"))) {
         smtp_server = domain;
-        smtp_port = 1025;
     } else {
         StringBuilder builder = {0};
         err = smtp_lookup_server(domain, &builder);
         if (has_error(err)) { return err; }
-
         smtp_server = sb_to_sv(&builder);
-        smtp_port = 25;
     }
 
+    // TODO: TLS
+
     // SMTP server communication
-    SmtpConnection conn = smtp_connection_init(smtp_server, smtp_port);
-    smtp_connect(&conn);
+    SmtpConnection conn = {};
+    smtp_connect(&conn, smtp_server, smtp_port);
 
     err = smtp_read(&conn);
     if (has_error(err)) { return err; }
 
-    err = smtp_write(&conn, SV("EHLO ayush-kumar.com")); // TODO: my host
+    err = smtp_write(&conn, tprintf("EHLO "SV_Fmt, SV_Arg(get_local_host())));
     if (has_error(err)) { return err; }
     err = smtp_expect_response(&conn, 250);
     if (has_error(err)) { return err; }
 
     // 1. MAIL FROM
-    err = smtp_write(&conn, tprintf("MAIL FROM:<%s>", sv_to_tmp_c(email.from)));
+    err = smtp_write(&conn, tprintf("MAIL FROM:<"SV_Fmt">", SV_Arg(email.from)));
     if (has_error(err)) return err;
     err = smtp_expect_response(&conn, 250);
     if (has_error(err)) { return err; }
 
     // 2. RCPT TO
-    err = smtp_write(&conn, tprintf("RCPT TO:<%s>", sv_to_tmp_c(email.to)));
+    err = smtp_write(&conn, tprintf("RCPT TO:<"SV_Fmt">", SV_Arg(email.to)));
     if (has_error(err)) return err;
     err = smtp_expect_response(&conn, 250);
     if (has_error(err)) { return err; }
@@ -233,5 +231,177 @@ Error smtp_send(const Email email) {
     err = smtp_write(&conn, SV("QUIT"));
     if (has_error(err)) return err;
 
+    DEBUG("Message sent");
+
     return ErrorNil;
+}
+
+Error smtp_server_init(SmtpServer* server) {
+    assert(server != NULL);
+
+    server->sock_fd = socket(AF_INET, SOCK_STREAM, 0);
+    if (server->sock_fd < 0) {
+        return errorf("socket failed: %s", strerror(errno));
+    }
+
+    int socket_options = 1;
+#ifdef SO_REUSEADDR
+    if (setsockopt(server->sock_fd, SOL_SOCKET, SO_REUSEADDR, &socket_options,
+                   sizeof(socket_options)) < 0) {
+        return errorf("setsockopt failed: %s", strerror(errno));
+                   }
+#endif
+
+#ifdef SO_REUSEPORT
+    if (setsockopt(server->sock_fd, SOL_SOCKET, SO_REUSEPORT, &socket_options,
+                   sizeof(socket_options)) < 0) {
+        return errorf("setsockopt failed: %s", strerror(errno));
+                   }
+#endif
+
+    int port = config_get_int(SV("server.smtp.port"), SMTP_DEFAULT_PORT);
+
+    server->addr.sin_family = AF_INET;
+    server->addr.sin_addr.s_addr = INADDR_ANY;
+    server->addr.sin_port = htons(port);
+
+    if (bind(server->sock_fd, (struct sockaddr *) &server->addr,
+             sizeof(server->addr)) < 0) {
+        return errorf("bind failed: %s", strerror(errno));
+    }
+
+    return ErrorNil;
+}
+
+typedef enum {
+    SMTP_STATE_CONNECTED,
+    SMTP_STATE_GREETED,
+    SMTP_STATE_MAIL_FROM,
+    SMTP_STATE_RCPT_TO,
+    SMTP_STATE_DATA,
+    SMTP_STATE_QUIT,
+} SmtpSessionState;
+
+Error smtp_recv(SmtpConnection* conn, const char* terminator) {
+    conn->read_buf.length = 0;
+    char buf[512];
+
+    while (true) {
+        const ssize_t n = read(conn->sock_fd, buf, sizeof(buf));
+        if (n < 0) {
+            if (errno == EAGAIN || errno == EWOULDBLOCK) break;
+            return errorf("smtp read failed: %s", strerror(errno));
+        }
+        if (n == 0) return errorf("smtp connection closed");
+        sb_push_sv(&conn->read_buf, SV2(buf, n));
+
+        if (sv_find(sb_to_sv(&conn->read_buf), terminator) != -1) break;
+    }
+
+    DEBUG("smtp recv: " SV_Fmt, SV_Arg(conn->read_buf));
+    return ErrorNil;
+}
+
+static void* handle_client(void* p) {
+    const int client_fd = (int)(intptr_t) p;
+    SmtpConnection conn = {client_fd};
+
+    SmtpSessionState state = SMTP_STATE_CONNECTED;
+
+    String mail_from = StringNil;
+    String rcpt_to = StringNil;
+
+    // Greeting
+    smtp_write(&conn, tprintf("220 "SV_Fmt" ESMTP ready", SV_Arg(get_local_host())));
+
+    while (state != SMTP_STATE_QUIT) {
+        Error err = smtp_recv(&conn, CRLF);
+        if (has_error(err)) {
+            ERROR("smtp_read failed: %s\n", strerror(errno));
+            break;
+        }
+
+        const String line = sv_trim(sb_to_sv(&conn.read_buf));
+        StringPair cmd_rest = sv_split_delim(line, ' ');
+        const String cmd  = sv_trim(cmd_rest.first);
+        const String rest = sv_trim(cmd_rest.second);
+
+        if (sv_equal_ignore_case(cmd, SV("EHLO")) || sv_equal_ignore_case(cmd, SV("HELO"))) {
+            state = SMTP_STATE_GREETED;
+            smtp_write(&conn, tprintf("250 " SV_Fmt " greets " SV_Fmt, SV_Arg(get_local_host()), SV_Arg(rest)));
+
+        } else if (sv_equal_ignore_case(cmd, SV("MAIL"))) {
+            // MAIL FROM:<sender@example.com>
+            // extract email between < >
+            const StringPair pair = sv_split_delim(rest, '<');
+            mail_from = sv_clone(sv_split_delim(pair.second, '>').first);
+            state = SMTP_STATE_MAIL_FROM;
+            smtp_write(&conn, SV("250 OK"));
+
+        } else if (sv_equal_ignore_case(cmd, SV("RCPT"))) {
+            // RCPT TO:<recipient@example.com>
+            const StringPair pair = sv_split_delim(rest, '<');
+            rcpt_to = sv_clone(sv_split_delim(pair.second, '>').first);
+            state = SMTP_STATE_RCPT_TO;
+            smtp_write(&conn, SV("250 OK"));
+
+        } else if (sv_equal_ignore_case(cmd, SV("DATA"))) {
+            state = SMTP_STATE_DATA;
+            smtp_write(&conn, SV("354 Start input, end with <CRLF>.<CRLF>"));
+
+            // read body until "\r\n.\r\n"
+            err = smtp_recv(&conn, CRLF "." CRLF);
+            if (has_error(err)) break;
+
+            String body = sv_clone(sb_to_sv(&conn.read_buf));
+            body.length -= strlen(CRLF "." CRLF);
+
+            String filename = tprintf("maildir/%s.eml", sv_to_tmp_c(random_id()));
+            write_entire_file(filename.data, body);
+
+            smtp_write(&conn, SV("250 OK queued"));
+
+        } else if (sv_equal_ignore_case(cmd, SV("QUIT"))) {
+            state = SMTP_STATE_QUIT;
+            smtp_write(&conn, SV("221 Bye"));
+
+        } else {
+            smtp_write(&conn, SV("502 Command not implemented"));
+        }
+    }
+
+    safe_free(mail_from.data);
+    safe_free(rcpt_to.data);
+
+    close(client_fd);
+    return NULL;
+}
+
+Error smtp_server_listen(const SmtpServer* server) {
+    assert(server != NULL);
+    assert(server->sock_fd > 0);
+
+    if (listen(server->sock_fd, SMTP_SOCKET_BACKLOG) < 0) {
+        return errorf("listen failed: %s\n", strerror(errno));
+    }
+
+    INFO("server started");
+    while (true) {
+        const int client_fd = accept(server->sock_fd, NULL, NULL);
+        if (client_fd < 0) {
+            ERROR("accept failed: %s\n", strerror(errno));
+            continue;
+        }
+
+        pthread_t tid;
+        if (pthread_create(&tid, NULL, handle_client, (void*)(intptr_t)client_fd) != 0) {
+            close(client_fd);
+            ERROR("pthread_create failed: %s\n", strerror(errno));
+            continue;
+        }
+
+        pthread_detach(tid);
+    }
+
+    assert(false && "unreachable");
 }

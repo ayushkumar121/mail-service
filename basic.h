@@ -8,6 +8,8 @@
 #include <string.h>
 #include <stdlib.h>
 
+#define safe_free(ptr) if (ptr) {free(ptr); (ptr) = NULL;}
+
 #define DEBUG(format, ...) fprintf(stderr, "DEBUG: " format "\n", ##__VA_ARGS__)
 #define INFO(format, ...) fprintf(stderr, "INFO: " format "\n", ##__VA_ARGS__)
 #define WARN(format, ...) fprintf(stderr, "WARN: " format "\n", ##__VA_ARGS__)
