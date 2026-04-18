@@ -14,7 +14,7 @@ typedef struct {
     String password;
 } Email;
 
-Error smtp_send_email(Email email);
+Error smtp_send(Email email);
 
 // SMTP Server
 

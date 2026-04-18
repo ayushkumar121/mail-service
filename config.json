@@ -5,6 +5,7 @@
         "port": 8080
     },
     "smtp": {
+        "dir": "maildir",
         "port": 25
     }
   }

@@ -16,6 +16,7 @@
 
 #define SMTP_DEFAULT_PORT 25
 #define SMTP_SOCKET_BACKLOG 1024
+#define SMTP_DEFAULT_DIR SV("maildir")
 
 String get_local_host() {
     static String host;
@@ -23,6 +24,15 @@ String get_local_host() {
         host = config_get_string(SV("server.host"), SV("localhost"));
     }
     return host;
+}
+
+String get_mail_dir() {
+    static String maildir;
+    if (maildir.length == 0) {
+        maildir = config_get_string(SV("server.smtp.dir"), SMTP_DEFAULT_DIR);
+        make_directory(sv_to_tmp_c(maildir));
+    }
+    return maildir;
 }
 
 Error smtp_lookup_server(String domain, StringBuilder* host_smtp_server) {
@@ -161,7 +171,7 @@ Error smtp_expect_response(SmtpConnection* conn, int expected) {
     return ErrorNil;
 }
 
-Error smtp_send_email(const Email email) {
+Error smtp_send(const Email email) {
     Error err;
     const String domain = sv_split_delim(email.to, '@').second;
 
@@ -356,7 +366,7 @@ static void* handle_client(void* p) {
             String body = sv_clone(sb_to_sv(&conn.read_buf));
             body.length -= strlen(CRLF "." CRLF);
 
-            String filename = tprintf("maildir/%s.eml", sv_to_tmp_c(random_id()));
+            const String filename = tprintf(SV_Fmt"/%s.eml", SV_Arg(get_mail_dir()), sv_to_tmp_c(random_id()));
             write_entire_file(filename.data, body);
 
             smtp_write(&conn, SV("250 OK queued"));

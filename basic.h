@@ -241,6 +241,8 @@ Error read_entire_file(const char* path, StringBuilder* sb);
 
 Error write_entire_file(const char* path, String sv);
 
+Error make_directory(const char* path);
+
 // UUID
 #define RANDOM_ID_LEN 12
 

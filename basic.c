@@ -1100,6 +1100,28 @@ Error write_entire_file(const char *path, String sv) {
   return ErrorNil;
 }
 
+Error make_directory(const char* path) {
+  char tmp[256];
+  snprintf(tmp, sizeof(tmp), "%s", path);
+
+  for (char* p = tmp + 1; *p; p++) {
+    if (*p == '/') {
+      *p = '\0';
+      if (mkdir(tmp, 0755) != 0 && errno != EEXIST) {
+        return errorf("mkdir failed for %s: %s", tmp, strerror(errno));
+      }
+      *p = '/';
+    }
+  }
+
+  // create the final directory
+  if (mkdir(tmp, 0755) != 0 && errno != EEXIST) {
+    return errorf("mkdir failed for %s: %s", tmp, strerror(errno));
+  }
+
+  return ErrorNil;
+}
+
 #define HEX_CHARSET_LEN 16
 const char hex_chars[] = "0123456789abcdef";
 
