@@ -9,4 +9,7 @@ double config_get_double(String key, int default_value);
 int config_get_int(String key, int default_value);
 void config_free(void);
 
+String get_hostname(void);
+String get_maildir(void);
+
 #endif

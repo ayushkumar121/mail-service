@@ -49,3 +49,23 @@ void config_free(void) {
   assert(config != NULL);
   json_free(config);
 }
+
+String get_hostname(void) {
+  static String host;
+  if (host.length == 0) {
+    host = config_get_string(SV("server.host"), SV("localhost"));
+  }
+  return host;
+}
+
+String get_maildir(void) {
+  static String maildir;
+  if (maildir.length == 0) {
+    maildir = config_get_string(SV("server.maildir"), SV("maildir"));
+  }
+  const char* maildir_cstr = sv_to_tmp_c(maildir);
+  if (!file_exists(maildir_cstr)) {
+    make_directory(maildir_cstr);
+  }
+  return maildir;
+}

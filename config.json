@@ -1,12 +1,15 @@
 {
   "server": {
     "host": "ayush-kumar.com",
+    "maildir": "maildir",
     "http": {
-        "port": 8080
+      "port": 8080
     },
     "smtp": {
-        "dir": "maildir",
-        "port": 25
+      "port": 25
+    },
+    "imap": {
+      "port": 143
     }
   }
 }
