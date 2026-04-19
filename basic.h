@@ -256,6 +256,7 @@ typedef struct {
   int fd;
   StringBuilder read_buf;
   StringBuilder write_buf;
+  StringBuilder overflow;
 } BufIO;
 
 Error bufio_read_until(BufIO* bio, const char* terminator);

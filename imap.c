@@ -155,8 +155,8 @@ static void* handle_client(void* p) {
         }
     }
 
-    if (session.user.data) free(session.user.data);
-    if (session.selected_mailbox.data) free(session.selected_mailbox.data);
+    safe_free(session.user.data);
+    safe_free(session.selected_mailbox.data);
     bufio_close(&bio);
     return NULL;
 }
