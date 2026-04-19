@@ -1265,4 +1265,5 @@ void bufio_close(BufIO* bio) {
     close(bio->fd);
     sb_free(&bio->read_buf);
     sb_free(&bio->write_buf);
+    sb_free(&bio->overflow);
 }
