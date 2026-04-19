@@ -16,27 +16,6 @@
 
 #define SMTP_DEFAULT_PORT 25
 #define SMTP_SOCKET_BACKLOG 1024
-#define SMTP_DEFAULT_DIR SV("maildir")
-
-String get_local_host() {
-    static String host;
-    if (host.length == 0) {
-        host = config_get_string(SV("server.host"), SV("localhost"));
-    }
-    return host;
-}
-
-String get_mail_dir() {
-    static String maildir;
-    if (maildir.length == 0) {
-        maildir = config_get_string(SV("server.smtp.dir"), SMTP_DEFAULT_DIR);
-    }
-    const char* maildir_cstr = sv_to_tmp_c(maildir);
-    if (!file_exists(maildir_cstr)) {
-        make_directory(maildir_cstr);
-    }
-    return maildir;
-}
 
 Error smtp_lookup_server(String domain, StringBuilder* host_smtp_server) {
     const char* domain_cstr = sv_to_tmp_c(domain);
@@ -61,14 +40,8 @@ Error smtp_lookup_server(String domain, StringBuilder* host_smtp_server) {
     return ErrorNil;
 }
 
-typedef struct {
-    int sock_fd;
-    StringBuilder read_buf;
-    StringBuilder write_buf;
-} SmtpConnection;
-
-Error smtp_connect(SmtpConnection* conn, String host, int port) {
-    assert(conn != NULL);
+Error smtp_connect(BufIO* bio, String host, int port) {
+    assert(bio != NULL);
 
     char* host_cstr = sv_to_tmp_c(host);
     char* port_cstr = tprintf("%d", port).data;
@@ -82,93 +55,69 @@ Error smtp_connect(SmtpConnection* conn, String host, int port) {
         return errorf("getaddrinfo failed for " SV_Fmt ": %s", SV_Arg(host), strerror(errno));
     }
 
-    conn->sock_fd = socket(res->ai_family, res->ai_socktype, res->ai_protocol);
-    if (conn->sock_fd < 0) {
+    bio->fd = socket(res->ai_family, res->ai_socktype, res->ai_protocol);
+    if (bio->fd < 0) {
         freeaddrinfo(res);
         return errorf("socket failed: %s", strerror(errno));
     }
 
-    if (connect(conn->sock_fd, res->ai_addr, res->ai_addrlen) < 0) {
+    if (connect(bio->fd, res->ai_addr, res->ai_addrlen) < 0) {
         freeaddrinfo(res);
-        return errorf("connect failed to " SV_Fmt ": %d:%s", SV_Arg(host), port,
-                      strerror(errno));
+        return errorf("connect failed to " SV_Fmt ": %d:%s", SV_Arg(host), port, strerror(errno));
     }
 
-    DEBUG("Connected to: "SV_Fmt" %d", SV_Arg(host), port);
+    DEBUG("Connected to: " SV_Fmt " %d", SV_Arg(host), port);
 
     freeaddrinfo(res);
     return ErrorNil;
 }
 
-Error smtp_read(SmtpConnection* conn) {
-    conn->read_buf.length = 0;
+Error smtp_read_from_server(BufIO* bio) {
+    bio->read_buf.length = 0;
     char buf[512];
 
     bool finished = false;
     size_t scan_offset = 0;
 
     while (!finished) {
-        const ssize_t n = read(conn->sock_fd, buf, sizeof(buf));
+        const ssize_t n = read(bio->fd, buf, sizeof(buf));
         if (n < 0) {
             if (errno == EAGAIN || errno == EWOULDBLOCK) break;
             return errorf("smtp read failed: %s", strerror(errno));
         }
         if (n == 0) return errorf("smtp connection closed");
-        sb_push_sv(&conn->read_buf, SV2(buf, n));
+        sb_push_sv(&bio->read_buf, SV2(buf, n));
 
-        // Finding the message end
-        const String sv = SV2(conn->read_buf.data + scan_offset, conn->read_buf.length - scan_offset);
+        const String sv = SV2(bio->read_buf.data + scan_offset, bio->read_buf.length - scan_offset);
         StringPair pair = sv_split_str(sv, CRLF);
         while (pair.first.length > 0) {
             const String line = pair.first;
             if (line.length >= 4 && line.data[3] == ' ') {
                 finished = true;
                 break;
-            };
+            }
             pair = sv_split_str(pair.second, CRLF);
         }
         scan_offset += n;
     }
 
-    DEBUG("smtp recv: " SV_Fmt, SV_Arg(conn->read_buf));
+    DEBUG("smtp recv: " SV_Fmt, SV_Arg(bio->read_buf));
     return ErrorNil;
 }
 
-Error smtp_write(SmtpConnection* conn, const String data) {
-    conn->write_buf.length = 0;
-    sb_push_sv(&conn->write_buf, data);
-    sb_push_str(&conn->write_buf, CRLF);
-
-    DEBUG("smtp send: " SV_Fmt, SV_Arg(conn->write_buf));
-
-    size_t total_written = 0;
-    while (total_written < conn->write_buf.length) {
-        const ssize_t n = write(conn->sock_fd, conn->write_buf.data + total_written,
-                          conn->write_buf.length - total_written);
-        if (n < 0) {
-            if (errno == EAGAIN || errno == EINTR || errno == EWOULDBLOCK) continue;
-            return errorf("smtp write failed: %s", strerror(errno));
-        }
-        if (n == 0) return errorf("smtp connection closed");
-        total_written += n;
-    }
-
-    return ErrorNil;
-}
-
-Error smtp_expect_response(SmtpConnection* conn, int expected) {
-    Error err = smtp_read(conn);
+Error smtp_expect_response(BufIO* bio, int expected) {
+    Error err = smtp_read_from_server(bio);
     if (has_error(err)) return err;
 
-    const String response = sb_to_sv(&conn->read_buf);
+    const String response = sb_to_sv(&bio->read_buf);
     if (response.length < 3) return error("smtp response too short");
 
-    char *endptr = NULL;
+    char* endptr = NULL;
     const String code_sv = SV2(response.data, 3);
     int code = sv_to_int(code_sv, &endptr);
 
     if (code != expected) {
-        return errorf(SV_Fmt, SV_Arg(conn->read_buf));
+        return errorf(SV_Fmt, SV_Arg(bio->read_buf));
     }
 
     return ErrorNil;
@@ -186,67 +135,152 @@ Error smtp_send(const Email email) {
     } else {
         StringBuilder builder = {0};
         err = smtp_lookup_server(domain, &builder);
-        if (has_error(err)) { return err; }
+        if (has_error(err)) return err;
         smtp_server = sb_to_sv(&builder);
     }
 
     // TODO: TLS
 
-    // SMTP server communication
-    SmtpConnection conn = {};
-    smtp_connect(&conn, smtp_server, smtp_port);
+    BufIO bio = {0};
+    err = smtp_connect(&bio, smtp_server, smtp_port);
+    if (has_error(err)) return err;
 
-    err = smtp_read(&conn);
-    if (has_error(err)) { return err; }
+    err = smtp_expect_response(&bio, 220);
+    if (has_error(err)) return err;
 
-    err = smtp_write(&conn, tprintf("EHLO "SV_Fmt, SV_Arg(get_local_host())));
-    if (has_error(err)) { return err; }
-    err = smtp_expect_response(&conn, 250);
-    if (has_error(err)) { return err; }
+    err = bufio_writeln(&bio, tprintf("EHLO " SV_Fmt, SV_Arg(get_hostname())));
+    if (has_error(err)) return err;
+    err = smtp_expect_response(&bio, 250);
+    if (has_error(err)) return err;
 
     // 1. MAIL FROM
-    err = smtp_write(&conn, tprintf("MAIL FROM:<"SV_Fmt">", SV_Arg(email.from)));
+    err = bufio_writeln(&bio, tprintf("MAIL FROM:<" SV_Fmt ">", SV_Arg(email.from)));
     if (has_error(err)) return err;
-    err = smtp_expect_response(&conn, 250);
-    if (has_error(err)) { return err; }
+    err = smtp_expect_response(&bio, 250);
+    if (has_error(err)) return err;
 
     // 2. RCPT TO
-    err = smtp_write(&conn, tprintf("RCPT TO:<"SV_Fmt">", SV_Arg(email.to)));
+    err = bufio_writeln(&bio, tprintf("RCPT TO:<" SV_Fmt ">", SV_Arg(email.to)));
     if (has_error(err)) return err;
-    err = smtp_expect_response(&conn, 250);
-    if (has_error(err)) { return err; }
+    err = smtp_expect_response(&bio, 250);
+    if (has_error(err)) return err;
 
     // 3. DATA
-    err = smtp_write(&conn, SV("DATA"));
+    err = bufio_writeln(&bio, SV("DATA"));
     if (has_error(err)) return err;
-    err = smtp_expect_response(&conn, 354);
-    if (has_error(err)) { return err; }
-
-    // 4. Send headers + body
-    err = smtp_write(&conn, tprintf("From: " SV_Fmt, SV_Arg(email.from)));
-    if (has_error(err)) return err;
-    err = smtp_write(&conn, tprintf("To: " SV_Fmt, SV_Arg(email.to)));
-    if (has_error(err)) return err;
-    err = smtp_write(&conn, tprintf("Subject: " SV_Fmt, SV_Arg(email.subject)));
-    if (has_error(err)) return err;
-    err = smtp_write(&conn, SV("")); // blank line separates headers from body
-    if (has_error(err)) return err;
-    err = smtp_write(&conn, email.body);
+    err = smtp_expect_response(&bio, 354);
     if (has_error(err)) return err;
 
-    // 5. End with a single dot on its own line
-    err = smtp_write(&conn, SV("."));
+    // 4. Headers + body
+    err = bufio_writeln(&bio, tprintf("From: " SV_Fmt, SV_Arg(email.from)));
     if (has_error(err)) return err;
-    err = smtp_expect_response(&conn, 250);
-    if (has_error(err)) { return err; }
+    err = bufio_writeln(&bio, tprintf("To: " SV_Fmt, SV_Arg(email.to)));
+    if (has_error(err)) return err;
+    err = bufio_writeln(&bio, tprintf("Subject: " SV_Fmt, SV_Arg(email.subject)));
+    if (has_error(err)) return err;
+    err = bufio_writeln(&bio, SV(""));
+    if (has_error(err)) return err;
+    err = bufio_writeln(&bio, email.body);
+    if (has_error(err)) return err;
+
+    // 5. End with dot
+    err = bufio_writeln(&bio, SV("."));
+    if (has_error(err)) return err;
+    err = smtp_expect_response(&bio, 250);
+    if (has_error(err)) return err;
 
     // 6. Quit
-    err = smtp_write(&conn, SV("QUIT"));
+    err = bufio_writeln(&bio, SV("QUIT"));
     if (has_error(err)) return err;
 
+    bufio_close(&bio);
     DEBUG("Message sent");
-
     return ErrorNil;
+}
+
+typedef enum {
+    SMTP_STATE_CONNECTED,
+    SMTP_STATE_GREETED,
+    SMTP_STATE_MAIL_FROM,
+    SMTP_STATE_RCPT_TO,
+    SMTP_STATE_DATA,
+    SMTP_STATE_QUIT,
+} SmtpSessionState;
+
+static void* handle_client(void* p) {
+    const int client_fd = (int)(intptr_t)p;
+    BufIO bio = {.fd = client_fd};
+
+    SmtpSessionState state = SMTP_STATE_CONNECTED;
+    String mail_from = StringNil;
+    String rcpt_to = StringNil;
+
+    // Greeting
+    bufio_writeln(&bio, tprintf("220 " SV_Fmt " ESMTP ready", SV_Arg(get_hostname())));
+
+    while (state != SMTP_STATE_QUIT) {
+        Error err = bufio_read_until(&bio, CRLF);
+        if (has_error(err)) {
+            ERROR("smtp recv failed: " SV_Fmt, SV_Arg(err.message));
+            break;
+        }
+
+        const String line = sv_trim(sb_to_sv(&bio.read_buf));
+        StringPair cmd_rest = sv_split_delim(line, ' ');
+        const String cmd  = sv_trim(cmd_rest.first);
+        const String rest = sv_trim(cmd_rest.second);
+
+        if (sv_equal_ignore_case(cmd, SV("EHLO")) || sv_equal_ignore_case(cmd, SV("HELO"))) {
+            state = SMTP_STATE_GREETED;
+            bufio_writeln(&bio, tprintf("250 " SV_Fmt " greets " SV_Fmt, SV_Arg(get_hostname()), SV_Arg(rest)));
+
+        } else if (sv_equal_ignore_case(cmd, SV("MAIL"))) {
+            const StringPair pair = sv_split_delim(rest, '<');
+            mail_from = sv_clone(sv_split_delim(pair.second, '>').first);
+            state = SMTP_STATE_MAIL_FROM;
+            bufio_writeln(&bio, SV("250 OK"));
+
+        } else if (sv_equal_ignore_case(cmd, SV("RCPT"))) {
+            const StringPair pair = sv_split_delim(rest, '<');
+            rcpt_to = sv_clone(sv_split_delim(pair.second, '>').first);
+            state = SMTP_STATE_RCPT_TO;
+
+            String path = tprintf(SV_Fmt "/" SV_Fmt "/inbox", SV_Arg(get_maildir()), SV_Arg(rcpt_to));
+            if (!file_exists(path.data)) make_directory(path.data);
+
+            bufio_writeln(&bio, SV("250 OK"));
+
+        } else if (sv_equal_ignore_case(cmd, SV("DATA"))) {
+            state = SMTP_STATE_DATA;
+            bufio_writeln(&bio, SV("354 Start input, end with <CRLF>.<CRLF>"));
+
+            err = bufio_read_until(&bio, CRLF "." CRLF);
+            if (has_error(err)) break;
+
+            String body = sv_clone(sb_to_sv(&bio.read_buf));
+            body.length -= strlen(CRLF "." CRLF);
+
+            String filename = tprintf(SV_Fmt "/" SV_Fmt "/inbox/%s.eml",
+                SV_Arg(get_maildir()),
+                SV_Arg(rcpt_to),
+                sv_to_tmp_c(random_id()));
+            write_entire_file(filename.data, body);
+
+            bufio_writeln(&bio, SV("250 OK queued"));
+
+        } else if (sv_equal_ignore_case(cmd, SV("QUIT"))) {
+            state = SMTP_STATE_QUIT;
+            bufio_writeln(&bio, SV("221 Bye"));
+
+        } else {
+            bufio_writeln(&bio, SV("502 Command not implemented"));
+        }
+    }
+
+    safe_free(mail_from.data);
+    safe_free(rcpt_to.data);
+    bufio_close(&bio);
+    return NULL;
 }
 
 Error smtp_server_init(SmtpServer* server) {
@@ -262,14 +296,13 @@ Error smtp_server_init(SmtpServer* server) {
     if (setsockopt(server->sock_fd, SOL_SOCKET, SO_REUSEADDR, &socket_options,
                    sizeof(socket_options)) < 0) {
         return errorf("setsockopt failed: %s", strerror(errno));
-                   }
+    }
 #endif
-
 #ifdef SO_REUSEPORT
     if (setsockopt(server->sock_fd, SOL_SOCKET, SO_REUSEPORT, &socket_options,
                    sizeof(socket_options)) < 0) {
         return errorf("setsockopt failed: %s", strerror(errno));
-                   }
+    }
 #endif
 
     int port = config_get_int(SV("server.smtp.port"), SMTP_DEFAULT_PORT);
@@ -278,125 +311,11 @@ Error smtp_server_init(SmtpServer* server) {
     server->addr.sin_addr.s_addr = INADDR_ANY;
     server->addr.sin_port = htons(port);
 
-    if (bind(server->sock_fd, (struct sockaddr *) &server->addr,
-             sizeof(server->addr)) < 0) {
+    if (bind(server->sock_fd, (struct sockaddr*)&server->addr, sizeof(server->addr)) < 0) {
         return errorf("bind failed: %s", strerror(errno));
     }
 
-    INFO("Setting up maildir: "SV_Fmt, SV_Arg(get_mail_dir()));
-
     return ErrorNil;
-}
-
-typedef enum {
-    SMTP_STATE_CONNECTED,
-    SMTP_STATE_GREETED,
-    SMTP_STATE_MAIL_FROM,
-    SMTP_STATE_RCPT_TO,
-    SMTP_STATE_DATA,
-    SMTP_STATE_QUIT,
-} SmtpSessionState;
-
-Error smtp_recv(SmtpConnection* conn, const char* terminator) {
-    conn->read_buf.length = 0;
-    char buf[512];
-
-    while (true) {
-        const ssize_t n = read(conn->sock_fd, buf, sizeof(buf));
-        if (n < 0) {
-            if (errno == EAGAIN || errno == EWOULDBLOCK) break;
-            return errorf("smtp read failed: %s", strerror(errno));
-        }
-        if (n == 0) return errorf("smtp connection closed");
-        sb_push_sv(&conn->read_buf, SV2(buf, n));
-
-        if (sv_find(sb_to_sv(&conn->read_buf), terminator) != -1) break;
-    }
-
-    DEBUG("smtp recv: " SV_Fmt, SV_Arg(conn->read_buf));
-    return ErrorNil;
-}
-
-static void* handle_client(void* p) {
-    const int client_fd = (int)(intptr_t) p;
-    SmtpConnection conn = {client_fd};
-
-    SmtpSessionState state = SMTP_STATE_CONNECTED;
-
-    String mail_from = StringNil;
-    String rcpt_to = StringNil;
-
-    // Greeting
-    smtp_write(&conn, tprintf("220 "SV_Fmt" ESMTP ready", SV_Arg(get_local_host())));
-
-    while (state != SMTP_STATE_QUIT) {
-        Error err = smtp_recv(&conn, CRLF);
-        if (has_error(err)) {
-            ERROR("smtp_read failed: %s\n", strerror(errno));
-            break;
-        }
-
-        const String line = sv_trim(sb_to_sv(&conn.read_buf));
-        StringPair cmd_rest = sv_split_delim(line, ' ');
-        const String cmd  = sv_trim(cmd_rest.first);
-        const String rest = sv_trim(cmd_rest.second);
-
-        if (sv_equal_ignore_case(cmd, SV("EHLO")) || sv_equal_ignore_case(cmd, SV("HELO"))) {
-            state = SMTP_STATE_GREETED;
-            smtp_write(&conn, tprintf("250 " SV_Fmt " greets " SV_Fmt, SV_Arg(get_local_host()), SV_Arg(rest)));
-
-        } else if (sv_equal_ignore_case(cmd, SV("MAIL"))) {
-            // MAIL FROM:<sender@example.com>
-            // extract email between < >
-            const StringPair pair = sv_split_delim(rest, '<');
-            mail_from = sv_clone(sv_split_delim(pair.second, '>').first);
-            state = SMTP_STATE_MAIL_FROM;
-            smtp_write(&conn, SV("250 OK"));
-
-        } else if (sv_equal_ignore_case(cmd, SV("RCPT"))) {
-            // RCPT TO:<recipient@example.com>
-            const StringPair pair = sv_split_delim(rest, '<');
-            rcpt_to = sv_clone(sv_split_delim(pair.second, '>').first);
-            state = SMTP_STATE_RCPT_TO;
-
-            // TODO: reject emails if username is not found
-            String path = tprintf(SV_Fmt "/" SV_Fmt "/inbox", SV_Arg(get_mail_dir()), SV_Arg(rcpt_to));
-            if (!file_exists(path.data)) make_directory(path.data);
-
-            smtp_write(&conn, SV("250 OK"));
-        } else if (sv_equal_ignore_case(cmd, SV("DATA"))) {
-            state = SMTP_STATE_DATA;
-            smtp_write(&conn, SV("354 Start input, end with <CRLF>.<CRLF>"));
-
-            // read body until "\r\n.\r\n"
-            err = smtp_recv(&conn, CRLF "." CRLF);
-            if (has_error(err)) break;
-
-            String body = sv_clone(sb_to_sv(&conn.read_buf));
-            body.length -= strlen(CRLF "." CRLF);
-
-            String filename = tprintf(SV_Fmt "/" SV_Fmt "/inbox/%s.eml",
-                SV_Arg(get_mail_dir()),
-                SV_Arg(rcpt_to),
-                sv_to_tmp_c(random_id()));
-            write_entire_file(filename.data, body);
-
-            smtp_write(&conn, SV("250 OK queued"));
-
-        } else if (sv_equal_ignore_case(cmd, SV("QUIT"))) {
-            state = SMTP_STATE_QUIT;
-            smtp_write(&conn, SV("221 Bye"));
-
-        } else {
-            smtp_write(&conn, SV("502 Command not implemented"));
-        }
-    }
-
-    safe_free(mail_from.data);
-    safe_free(rcpt_to.data);
-
-    close(client_fd);
-    return NULL;
 }
 
 Error smtp_server_listen(const SmtpServer* server) {
@@ -407,7 +326,7 @@ Error smtp_server_listen(const SmtpServer* server) {
         return errorf("listen failed: %s\n", strerror(errno));
     }
 
-    INFO("server started");
+    INFO("SMTP server started");
     while (true) {
         const int client_fd = accept(server->sock_fd, NULL, NULL);
         if (client_fd < 0) {
