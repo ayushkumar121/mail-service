@@ -1152,3 +1152,100 @@ String random_id(void) {
   id[RANDOM_ID_LEN] = 0;
   return SV2(id, RANDOM_ID_LEN);
 }
+
+Error bufio_read_until(BufIO* bio, const char* terminator) {
+    bio->read_buf.length = 0;
+    char buf[512];
+
+    while (true) {
+        const ssize_t n = read(bio->fd, buf, sizeof(buf));
+        if (n < 0) {
+            if (errno == EAGAIN || errno == EWOULDBLOCK) break;
+            return errorf("bufio read failed: %s", strerror(errno));
+        }
+        if (n == 0) break; // EOF
+        sb_push_sv(&bio->read_buf, SV2(buf, n));
+        if (sv_find(sb_to_sv(&bio->read_buf), terminator) != -1) break;
+    }
+
+    return ErrorNil;
+}
+
+Error bufio_read_n(BufIO* bio, size_t n) {
+    bio->read_buf.length = 0;
+    char buf[512];
+
+    while (bio->read_buf.length < n) {
+        size_t to_read = n - bio->read_buf.length;
+        if (to_read > sizeof(buf)) to_read = sizeof(buf);
+
+        const ssize_t read_n = read(bio->fd, buf, to_read);
+        if (read_n < 0) {
+            if (errno == EAGAIN || errno == EWOULDBLOCK) continue;
+            return errorf("bufio read failed: %s", strerror(errno));
+        }
+        if (read_n == 0) return errorf("bufio connection closed");
+        sb_push_sv(&bio->read_buf, SV2(buf, read_n));
+    }
+
+    return ErrorNil;
+}
+
+Error bufio_read_line(BufIO* bio) {
+  return bufio_read_until(bio, "\n");
+}
+
+Error bufio_read_all(BufIO* bio) {
+    bio->read_buf.length = 0;
+    char buf[512];
+
+    while (true) {
+        const ssize_t n = read(bio->fd, buf, sizeof(buf));
+        if (n < 0) {
+            if (errno == EAGAIN || errno == EWOULDBLOCK) break; // no more data
+            return errorf("bufio read failed: %s", strerror(errno));
+        }
+        if (n == 0) break; // EOF
+        sb_push_sv(&bio->read_buf, SV2(buf, n));
+    }
+
+    return ErrorNil;
+}
+
+Error bufio_write(BufIO* bio, String data) {
+    bio->write_buf.length = 0;
+    sb_push_sv(&bio->write_buf, data);
+
+    return bufio_flush(bio);
+}
+
+Error bufio_writeln(BufIO* bio, String data) {
+  bio->write_buf.length = 0;
+  sb_push_sv(&bio->write_buf, data);
+  sb_push_sv(&bio->write_buf, SV("\r\n"));
+
+  return bufio_flush(bio);
+}
+
+Error bufio_flush(BufIO* bio) {
+  size_t total_written = 0;
+  while (total_written < bio->write_buf.length) {
+    const ssize_t n = write(bio->fd, bio->write_buf.data + total_written,
+                            bio->write_buf.length - total_written);
+    if (n < 0) {
+      if (errno == EAGAIN || errno == EINTR || errno == EWOULDBLOCK) continue;
+      return errorf("bufio write failed: %s", strerror(errno));
+    }
+    if (n == 0) return errorf("bufio connection closed");
+    total_written += n;
+  }
+
+  return ErrorNil;
+}
+
+void bufio_close(BufIO* bio) {
+    assert(bio != NULL);
+    close(bio->fd);
+    sb_free(&bio->read_buf);
+    sb_free(&bio->write_buf);
+}

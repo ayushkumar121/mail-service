@@ -250,6 +250,23 @@ Error random_bytes(char* buf, size_t n);
 
 String random_id(void);
 
+// BUF IO
+
+typedef struct {
+  int fd;
+  StringBuilder read_buf;
+  StringBuilder write_buf;
+} BufIO;
+
+Error bufio_read_until(BufIO* bio, const char* terminator);
+Error bufio_read_n(BufIO* bio, size_t n);
+Error bufio_read_line(BufIO* bio);
+Error bufio_read_all(BufIO* bio);
+Error bufio_write(BufIO* bio, String data);
+Error bufio_writeln(BufIO* bio, String data);
+Error bufio_flush(BufIO* bio);
+void  bufio_close(BufIO* bio);
+
 // Priority Queue
 #define PQUEUE(T) \
   struct { \
