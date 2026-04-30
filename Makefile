@@ -11,5 +11,9 @@ $(MAIN): $(MAIN).c $(OBJS)
 %.o: %.c %.h
 	$(CC) -c -o $@ $< $(CFLAGS)
 
+test: $(MAIN)
+	@bash tests/setup_fixture.sh
+	@bash tests/imap_tests.sh
+
 clean:
 	rm -f $(MAIN) $(OBJS)
