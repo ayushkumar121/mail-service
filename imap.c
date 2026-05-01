@@ -12,6 +12,7 @@
 #define IMAP_SOCKET_BACKLOG 1024
 #define IMAP_DEFAULT_PORT 143
 #define CRLF "\r\n"
+#define IMAP_CAPABILITY "IMAP4rev1"
 
 typedef enum {
     IMAP_STATE_NOT_AUTHENTICATED,
@@ -25,6 +26,100 @@ typedef struct {
     String user;
     String selected_mailbox;
 } ImapSession;
+
+// ---------------------------------------------------------------------------
+// Maildir flag helpers
+// Maildir encodes flags as a filename suffix: "basename.eml:2,DFrst"
+// Letters: D=Draft F=Flagged R=Replied S=Seen T=Trashed(\Deleted)
+// ---------------------------------------------------------------------------
+
+typedef struct {
+    bool seen;
+    bool deleted;
+    bool flagged;
+    bool replied;
+    bool draft;
+} MessageFlags;
+
+static MessageFlags parse_flags(String filename) {
+    MessageFlags f = {0};
+    ssize_t pos = sv_find(filename, ":2,");
+    if (pos < 0) return f;
+    for (size_t i = (size_t)pos + 3; i < filename.length; i++) {
+        switch (filename.data[i]) {
+            case 'S': f.seen    = true; break;
+            case 'T': f.deleted = true; break;
+            case 'F': f.flagged = true; break;
+            case 'R': f.replied = true; break;
+            case 'D': f.draft   = true; break;
+        }
+    }
+    return f;
+}
+
+// Returns the base name without ":2,..." suffix (tprintf-allocated)
+static String flags_basename(String filename) {
+    ssize_t pos = sv_find(filename, ":2,");
+    if (pos < 0) return filename;
+    return tprintf("%.*s", (int)pos, filename.data);
+}
+
+// Produces a new filename with flag_char set (keeps flags sorted, tprintf-allocated)
+static String set_flag(String filename, char flag_char) {
+    MessageFlags f = parse_flags(filename);
+    String base = flags_basename(filename);
+    switch (flag_char) {
+        case 'D': f.draft   = true; break;
+        case 'F': f.flagged = true; break;
+        case 'R': f.replied = true; break;
+        case 'S': f.seen    = true; break;
+        case 'T': f.deleted = true; break;
+    }
+    char flags[8] = {0};
+    int n = 0;
+    if (f.draft)   flags[n++] = 'D';
+    if (f.flagged) flags[n++] = 'F';
+    if (f.replied) flags[n++] = 'R';
+    if (f.seen)    flags[n++] = 'S';
+    if (f.deleted) flags[n++] = 'T';
+    return tprintf(SV_Fmt ":2,%s", SV_Arg(base), flags);
+}
+
+// Produces IMAP FLAGS string e.g. "(\Seen \Deleted)" (tprintf-allocated)
+static String flags_to_imap(MessageFlags f) {
+    StringBuilder sb = {0};
+    sb_push_char(&sb, '(');
+    bool first = true;
+    if (f.seen)    { if (!first) sb_push_char(&sb, ' '); sb_push_str(&sb, "\\Seen");    first = false; }
+    if (f.deleted) { if (!first) sb_push_char(&sb, ' '); sb_push_str(&sb, "\\Deleted"); first = false; }
+    if (f.flagged) { if (!first) sb_push_char(&sb, ' '); sb_push_str(&sb, "\\Flagged"); first = false; }
+    if (f.replied) { if (!first) sb_push_char(&sb, ' '); sb_push_str(&sb, "\\Answered"); first = false; }
+    if (f.draft)   { if (!first) sb_push_char(&sb, ' '); sb_push_str(&sb, "\\Draft");   first = false; }
+    sb_push_char(&sb, ')');
+    String result = tprintf("%.*s", (int)sb.length, sb.data);
+    sb_free(&sb);
+    return result;
+}
+
+// Map IMAP flag name (e.g. "\\Seen") to Maildir letter; returns 0 if unknown
+static char imap_flag_to_maildir(String imap_flag) {
+    if (sv_equal_ignore_case(imap_flag, SV("\\Seen")))    return 'S';
+    if (sv_equal_ignore_case(imap_flag, SV("\\Deleted"))) return 'T';
+    if (sv_equal_ignore_case(imap_flag, SV("\\Flagged"))) return 'F';
+    if (sv_equal_ignore_case(imap_flag, SV("\\Answered"))) return 'R';
+    if (sv_equal_ignore_case(imap_flag, SV("\\Draft")))   return 'D';
+    return 0;
+}
+
+static Error handle_capability(BufIO* bio, String tag) {
+    Error err = bufio_writeln(bio, SV("* CAPABILITY " IMAP_CAPABILITY));
+    if (has_error(err)) return err;
+    return bufio_writeln(bio, tprintf(SV_Fmt " OK CAPABILITY completed", SV_Arg(tag)));
+}
+
+static Error handle_noop(BufIO* bio, String tag) {
+    return bufio_writeln(bio, tprintf(SV_Fmt " OK NOOP completed", SV_Arg(tag)));
+}
 
 Error handle_login(BufIO* bio, ImapSession* session, String tag, String args) {
     // TODO: real password check
@@ -117,12 +212,153 @@ Error handle_fetch(BufIO* bio, const ImapSession* session, String tag, String ar
     return bufio_writeln(bio, tprintf(SV_Fmt " OK FETCH completed", SV_Arg(tag)));
 }
 
+static Error handle_status(BufIO* bio, const ImapSession* session, String tag, String args) {
+    // args: "INBOX (MESSAGES UNSEEN RECENT)" — extract mailbox name (first token)
+    StringPair pair = sv_split_delim(sv_trim(args), ' ');
+    String mailbox = sv_trim(pair.first);
+
+    String path = tprintf(SV_Fmt "/" SV_Fmt "/" SV_Fmt,
+                          SV_Arg(get_maildir()),
+                          SV_Arg(session->user),
+                          SV_Arg(mailbox));
+
+    int total = 0, unseen = 0;
+    DIR* dir = opendir(path.data);
+    if (dir != NULL) {
+        struct dirent* entry;
+        while ((entry = readdir(dir)) != NULL) {
+            String name = SV2(entry->d_name, strlen(entry->d_name));
+            if (sv_find(name, ".eml") == -1) continue;
+            total++;
+            MessageFlags f = parse_flags(name);
+            if (!f.seen) unseen++;
+        }
+        closedir(dir);
+    }
+
+    Error err = bufio_writeln(bio, tprintf("* STATUS " SV_Fmt " (MESSAGES %d UNSEEN %d RECENT 0)",
+                                           SV_Arg(mailbox), total, unseen));
+    if (has_error(err)) return err;
+    return bufio_writeln(bio, tprintf(SV_Fmt " OK STATUS completed", SV_Arg(tag)));
+}
+
+static Error handle_store(BufIO* bio, const ImapSession* session, String tag, String args) {
+    // args: "seq +FLAGS (\Seen)"
+    StringPair seq_rest = sv_split_delim(sv_trim(args), ' ');
+    char* endptr = NULL;
+    int seq = sv_to_int(sv_trim(seq_rest.first), &endptr);
+
+    // skip "+FLAGS" token, get the flags list
+    StringPair op_flags = sv_split_delim(sv_trim(seq_rest.second), ' ');
+    String flags_str = sv_trim(op_flags.second); // e.g. "(\Seen)" or "(\Deleted)"
+
+    // strip surrounding parens
+    if (flags_str.length >= 2 && flags_str.data[0] == '(') {
+        flags_str.data++;
+        flags_str.length -= 2;
+    }
+    flags_str = sv_trim(flags_str);
+
+    char maildir_flag = imap_flag_to_maildir(flags_str);
+    if (maildir_flag == 0) {
+        return bufio_writeln(bio, tprintf(SV_Fmt " BAD unknown flag", SV_Arg(tag)));
+    }
+
+    String dir_path = tprintf(SV_Fmt "/" SV_Fmt "/" SV_Fmt,
+                              SV_Arg(get_maildir()),
+                              SV_Arg(session->user),
+                              SV_Arg(session->selected_mailbox));
+
+    DIR* dir = opendir(dir_path.data);
+    if (dir == NULL) {
+        return bufio_writeln(bio, tprintf(SV_Fmt " NO mailbox not found", SV_Arg(tag)));
+    }
+
+    int count = 0;
+    struct dirent* entry;
+    String old_name = StringNil;
+    while ((entry = readdir(dir)) != NULL) {
+        String name = SV2(entry->d_name, strlen(entry->d_name));
+        if (sv_find(name, ".eml") == -1) continue;
+        count++;
+        if (count == seq) {
+            old_name = sv_clone(name);
+            break;
+        }
+    }
+    closedir(dir);
+
+    if (old_name.length == 0) {
+        return bufio_writeln(bio, tprintf(SV_Fmt " NO message not found", SV_Arg(tag)));
+    }
+
+    String new_name = set_flag(old_name, maildir_flag);
+    String old_path = tprintf(SV_Fmt "/" SV_Fmt, SV_Arg(dir_path), SV_Arg(old_name));
+    String new_path = tprintf(SV_Fmt "/" SV_Fmt, SV_Arg(dir_path), SV_Arg(new_name));
+
+    if (!sv_equal(old_name, new_name)) {
+        rename(old_path.data, new_path.data);
+    }
+    safe_free(old_name.data);
+
+    MessageFlags f = parse_flags(new_name);
+    String imap_flags = flags_to_imap(f);
+
+    Error err = bufio_writeln(bio, tprintf("* %d FETCH (FLAGS %s)", seq, imap_flags.data));
+    if (has_error(err)) return err;
+    return bufio_writeln(bio, tprintf(SV_Fmt " OK STORE completed", SV_Arg(tag)));
+}
+
+static Error handle_expunge(BufIO* bio, const ImapSession* session, String tag) {
+    String dir_path = tprintf(SV_Fmt "/" SV_Fmt "/" SV_Fmt,
+                              SV_Arg(get_maildir()),
+                              SV_Arg(session->user),
+                              SV_Arg(session->selected_mailbox));
+
+    DIR* dir = opendir(dir_path.data);
+    if (dir == NULL) {
+        return bufio_writeln(bio, tprintf(SV_Fmt " NO mailbox not found", SV_Arg(tag)));
+    }
+
+    // Collect all .eml filenames
+    typedef ARRAY(String) StringArray;
+    StringArray files = {0};
+    struct dirent* entry;
+    while ((entry = readdir(dir)) != NULL) {
+        String name = SV2(entry->d_name, strlen(entry->d_name));
+        if (sv_find(name, ".eml") == -1) continue;
+        array_append(&files, sv_clone(name));
+    }
+    closedir(dir);
+
+    // Walk in order; track current sequence number (shrinks as we delete)
+    int seq = 1;
+    Error err = ErrorNil;
+    for (size_t i = 0; i < files.length; i++) {
+        MessageFlags f = parse_flags(files.data[i]);
+        if (f.deleted) {
+            String full_path = tprintf(SV_Fmt "/" SV_Fmt, SV_Arg(dir_path), SV_Arg(files.data[i]));
+            remove(full_path.data);
+            err = bufio_writeln(bio, tprintf("* %d EXPUNGE", seq));
+            if (has_error(err)) break;
+            // do not increment seq — sequence numbers shift down after each expunge
+        } else {
+            seq++;
+        }
+        safe_free(files.data[i].data);
+    }
+    array_free(&files);
+
+    if (has_error(err)) return err;
+    return bufio_writeln(bio, tprintf(SV_Fmt " OK EXPUNGE completed", SV_Arg(tag)));
+}
+
 static void* handle_client(void* p) {
     int client_fd = (int)(intptr_t)p;
     BufIO bio = {.fd = client_fd};
     ImapSession session = {.state = IMAP_STATE_NOT_AUTHENTICATED};
 
-    bufio_writeln(&bio, SV("* OK IMAP server ready"));
+    bufio_writeln(&bio, SV("* OK [CAPABILITY " IMAP_CAPABILITY "] IMAP server ready"));
 
     while (session.state != IMAP_STATE_LOGOUT) {
         Error err = bufio_read_until(&bio, CRLF);
@@ -138,14 +374,26 @@ static void* handle_client(void* p) {
         const String cmd  = sv_trim(cmd_args.first);
         const String args = sv_trim(cmd_args.second);
 
-        if (sv_equal_ignore_case(cmd, SV("LOGIN"))) {
+        if (sv_equal_ignore_case(cmd, SV("CAPABILITY"))) {
+            handle_capability(&bio, tag);
+        } else if (sv_equal_ignore_case(cmd, SV("NOOP"))) {
+            handle_noop(&bio, tag);
+        } else if (sv_equal_ignore_case(cmd, SV("LOGIN"))) {
             handle_login(&bio, &session, tag, args);
         } else if (sv_equal_ignore_case(cmd, SV("LIST"))) {
             handle_list(&bio, tag);
         } else if (sv_equal_ignore_case(cmd, SV("SELECT"))) {
             handle_select(&bio, &session, tag, args);
+        } else if (sv_equal_ignore_case(cmd, SV("EXAMINE"))) {
+            handle_select(&bio, &session, tag, args);
+        } else if (sv_equal_ignore_case(cmd, SV("STATUS"))) {
+            handle_status(&bio, &session, tag, args);
         } else if (sv_equal_ignore_case(cmd, SV("FETCH"))) {
             handle_fetch(&bio, &session, tag, args);
+        } else if (sv_equal_ignore_case(cmd, SV("STORE"))) {
+            handle_store(&bio, &session, tag, args);
+        } else if (sv_equal_ignore_case(cmd, SV("EXPUNGE"))) {
+            handle_expunge(&bio, &session, tag);
         } else if (sv_equal_ignore_case(cmd, SV("LOGOUT"))) {
             bufio_writeln(&bio, SV("* BYE logging out"));
             bufio_writeln(&bio, tprintf(SV_Fmt " OK LOGOUT completed", SV_Arg(tag)));
