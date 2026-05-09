@@ -231,6 +231,7 @@ Error handle_fetch(BufIO* bio, const ImapSession* session, String tag, String ar
     char* endptr = NULL;
     StringPair pair = sv_split_delim(args, ' ');
     int seq = sv_to_int(sv_trim(pair.first), &endptr);
+    String fetch_item = sv_trim(pair.second);
 
     String path = tprintf(SV_Fmt "/" SV_Fmt "/" SV_Fmt,
                           SV_Arg(get_maildir()),
@@ -245,11 +246,13 @@ Error handle_fetch(BufIO* bio, const ImapSession* session, String tag, String ar
     int count = 0;
     struct dirent* entry;
     String filename = StringNil;
+    String entryname = StringNil;
     while ((entry = readdir(dir)) != NULL) {
         String name = SV2(entry->d_name, strlen(entry->d_name));
         if (sv_find(name, ".eml") != -1) {
             count++;
             if (count == seq) {
+                entryname = sv_clone(name);
                 filename = tprintf(SV_Fmt "/" SV_Fmt, SV_Arg(path), SV_Arg(name));
                 break;
             }
@@ -264,8 +267,19 @@ Error handle_fetch(BufIO* bio, const ImapSession* session, String tag, String ar
     StringBuilder body = {0};
     Error err = read_entire_file(filename.data, &body);
     if (has_error(err)) {
+        safe_free(entryname.data);
         return bufio_writeln(bio, tprintf(SV_Fmt " NO failed to read message", SV_Arg(tag)));
     }
+
+    // BODY[] (not BODY.PEEK[]) implicitly sets \Seen per RFC 3501
+    bool is_peek = sv_find(fetch_item, "PEEK") != -1;
+    bool is_body = sv_find(fetch_item, "BODY[") != -1 || sv_equal_ignore_case(fetch_item, SV("RFC822"));
+    if (is_body && !is_peek) {
+        String new_entry = set_flag(entryname, 'S');
+        String new_filename = tprintf(SV_Fmt "/" SV_Fmt, SV_Arg(path), SV_Arg(new_entry));
+        rename(filename.data, new_filename.data);
+    }
+    safe_free(entryname.data);
 
     err = bufio_writeln(bio, tprintf("* %d FETCH (BODY[] {%zu}", seq, body.length));
     if (has_error(err)) return err;
