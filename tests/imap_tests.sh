@@ -52,6 +52,34 @@ run_test "3  LOGIN accepted"                  "OK LOGIN"        "$T"
 # | 4 | LIST returns INBOX
 run_test "4  LIST returns INBOX"              "INBOX"           "$T"
 
+# | L1 | LIST all mailboxes (*)
+T=$(nc_send $"a1 LOGIN $USER $PASS\r\na2 LIST \"\" \"*\"\r\na3 LOGOUT\r\n")
+run_test "L1  LIST *: INBOX present"             "INBOX"           "$T"
+run_test "L1b LIST *: OK LIST"                   "OK LIST"         "$T"
+
+# | L2 | LIST exact match
+T=$(nc_send $"a1 LOGIN $USER $PASS\r\na2 LIST \"\" \"INBOX\"\r\na3 LOGOUT\r\n")
+run_test "L2  LIST exact INBOX"                  "INBOX"           "$T"
+
+# | L3 | LIST no match
+T=$(nc_send $"a1 LOGIN $USER $PASS\r\na2 LIST \"\" \"Nonexistent\"\r\na3 LOGOUT\r\n")
+run_test "L3  LIST no match: OK LIST"            "OK LIST"         "$T"
+if echo "$T" | grep -q "^\* LIST"; then
+    echo "FAIL  L3b LIST no match: unexpected * LIST line"
+    FAIL_COUNT=$((FAIL_COUNT + 1))
+else
+    echo "PASS  L3b LIST no match: no * LIST line emitted"
+    PASS_COUNT=$((PASS_COUNT + 1))
+fi
+
+# | L4 | LIST hierarchy probe (LIST "" "")
+T=$(nc_send $'a1 LIST "" ""\r\na2 LOGOUT\r\n')
+run_test "L4  LIST hierarchy probe: Noselect"    "Noselect"        "$T"
+
+# | L5 | LIST wildcard %
+T=$(nc_send $"a1 LOGIN $USER $PASS\r\na2 LIST \"\" \"%\"\r\na3 LOGOUT\r\n")
+run_test "L5  LIST %: INBOX present"             "INBOX"           "$T"
+
 # | 5 | SELECT INBOX (curl sends LIST for folder URLs, so use nc for SELECT)
 T=$(nc_send $"a1 LOGIN $USER $PASS\r\na2 SELECT INBOX\r\na3 LOGOUT\r\n")
 run_test "5  SELECT: OK SELECT"               "OK SELECT"       "$T"

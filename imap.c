@@ -5,6 +5,7 @@
 
 #include <errno.h>
 #include <dirent.h>
+#include <fnmatch.h>
 #include <sys/socket.h>
 
 #include "config.h"
@@ -52,6 +53,7 @@ static MessageFlags parse_flags(String filename) {
             case 'F': f.flagged = true; break;
             case 'R': f.replied = true; break;
             case 'D': f.draft   = true; break;
+            default: break;
         }
     }
     return f;
@@ -74,6 +76,7 @@ static String set_flag(String filename, char flag_char) {
         case 'R': f.replied = true; break;
         case 'S': f.seen    = true; break;
         case 'T': f.deleted = true; break;
+        default: break;
     }
     char flags[8] = {0};
     int n = 0;
@@ -129,9 +132,67 @@ Error handle_login(BufIO* bio, ImapSession* session, String tag, String args) {
     return bufio_writeln(bio, tprintf(SV_Fmt " OK LOGIN completed", SV_Arg(tag)));
 }
 
-Error handle_list(BufIO* bio, String tag) {
-    Error err = bufio_writeln(bio, SV("* LIST () \"/\" \"INBOX\""));
-    if (has_error(err)) return err;
+// Strip surrounding double-quotes from a string token if present
+static String strip_quotes(String s) {
+    if (s.length >= 2 && s.data[0] == '"' && s.data[s.length - 1] == '"') {
+        return SV2(s.data + 1, s.length - 2);
+    }
+    return s;
+}
+
+// Replace '%' with '*' so POSIX fnmatch handles flat-maildir LIST patterns
+static String normalize_pattern(String pat) {
+    StringBuilder sb = {0};
+    for (size_t i = 0; i < pat.length; i++) {
+        sb_push_char(&sb, pat.data[i] == '%' ? '*' : pat.data[i]);
+    }
+    String result = tprintf("%.*s", (int)sb.length, sb.data);
+    sb_free(&sb);
+    return result;
+}
+
+static Error handle_list(BufIO* bio, const ImapSession* session, String tag, String args) {
+    StringPair ref_pat = sv_split_delim(sv_trim(args), ' ');
+    String reference   = strip_quotes(sv_trim(ref_pat.first));
+    String pattern     = strip_quotes(sv_trim(ref_pat.second));
+
+    // Hierarchy-delimiter probe: LIST "" ""
+    if (pattern.length == 0) {
+        Error err = bufio_writeln(bio, SV("* LIST (\\Noselect) \"/\" \"\""));
+        if (has_error(err)) return err;
+        return bufio_writeln(bio, tprintf(SV_Fmt " OK LIST completed", SV_Arg(tag)));
+    }
+
+    // RFC 3501: reference and pattern are concatenated directly (no separator)
+    // e.g. LIST "INBOX" "*" -> effective pattern "INBOX*" which matches "INBOX"
+    String full_pattern = reference.length > 0
+        ? tprintf(SV_Fmt SV_Fmt, SV_Arg(reference), SV_Arg(pattern))
+        : pattern;
+    String norm = normalize_pattern(full_pattern);
+    const char* pat_cstr = sv_to_tmp_c(norm);
+
+    String user_dir = tprintf(SV_Fmt "/" SV_Fmt,
+                               SV_Arg(get_maildir()),
+                               SV_Arg(session->user));
+    DIR* dir = opendir(user_dir.data);
+    if (dir == NULL) {
+        // User maildir doesn't exist yet — return empty list
+        return bufio_writeln(bio, tprintf(SV_Fmt " OK LIST completed", SV_Arg(tag)));
+    }
+
+    struct dirent* entry;
+    while ((entry = readdir(dir)) != NULL) {
+        if (entry->d_type != DT_DIR) continue;
+        if (entry->d_name[0] == '.') continue;  // skip . and ..
+
+        String name = SV2(entry->d_name, strlen(entry->d_name));
+        if (fnmatch(pat_cstr, sv_to_tmp_c(name), FNM_CASEFOLD) != 0) continue;
+
+        Error err = bufio_writeln(bio,
+            tprintf("* LIST () \"/\" \"" SV_Fmt "\"", SV_Arg(name)));
+        if (has_error(err)) { closedir(dir); return err; }
+    }
+    closedir(dir);
     return bufio_writeln(bio, tprintf(SV_Fmt " OK LIST completed", SV_Arg(tag)));
 }
 
@@ -357,6 +418,40 @@ static Error handle_expunge(BufIO* bio, const ImapSession* session, String tag) 
     return bufio_writeln(bio, tprintf(SV_Fmt " OK EXPUNGE completed", SV_Arg(tag)));
 }
 
+static Error handle_search(BufIO* bio, const ImapSession* session, String tag) {
+    String path = tprintf(SV_Fmt "/" SV_Fmt "/" SV_Fmt,
+                          SV_Arg(get_maildir()),
+                          SV_Arg(session->user),
+                          SV_Arg(session->selected_mailbox));
+
+    // Count messages so we can build "* SEARCH 1 2 3 ..."
+    int count = 0;
+    DIR* dir = opendir(path.data);
+    if (dir != NULL) {
+        struct dirent* entry;
+        while ((entry = readdir(dir)) != NULL) {
+            String name = SV2(entry->d_name, strlen(entry->d_name));
+            if (sv_find(name, ".eml") != -1) count++;
+        }
+        closedir(dir);
+    }
+
+    // Build the sequence number list into a StringBuilder
+    StringBuilder sb = {0};
+    for (int i = 1; i <= count; i++) {
+        if (i > 1) sb_push_char(&sb, ' ');
+        // tprintf uses the temp allocator; push the number directly
+        char buf[16];
+        int len = snprintf(buf, sizeof(buf), "%d", i);
+        for (int j = 0; j < len; j++) sb_push_char(&sb, buf[j]);
+    }
+
+    Error err = bufio_writeln(bio, tprintf("* SEARCH %.*s", (int)sb.length, sb.data));
+    sb_free(&sb);
+    if (has_error(err)) return err;
+    return bufio_writeln(bio, tprintf(SV_Fmt " OK SEARCH completed", SV_Arg(tag)));
+}
+
 static void* handle_client(void* p) {
     int client_fd = (int)(intptr_t)p;
     BufIO bio = {.fd = client_fd};
@@ -378,6 +473,8 @@ static void* handle_client(void* p) {
         const String cmd  = sv_trim(cmd_args.first);
         const String args = sv_trim(cmd_args.second);
 
+        INFO("Command received: " SV_Fmt, SV_Arg(cmd));
+
         if (sv_equal_ignore_case(cmd, SV("CAPABILITY"))) {
             handle_capability(&bio, tag);
         } else if (sv_equal_ignore_case(cmd, SV("NOOP"))) {
@@ -385,13 +482,15 @@ static void* handle_client(void* p) {
         } else if (sv_equal_ignore_case(cmd, SV("LOGIN"))) {
             handle_login(&bio, &session, tag, args);
         } else if (sv_equal_ignore_case(cmd, SV("LIST"))) {
-            handle_list(&bio, tag);
+            handle_list(&bio, &session, tag, args);
         } else if (sv_equal_ignore_case(cmd, SV("SELECT"))) {
             handle_select(&bio, &session, tag, args);
         } else if (sv_equal_ignore_case(cmd, SV("EXAMINE"))) {
             handle_select(&bio, &session, tag, args);
         } else if (sv_equal_ignore_case(cmd, SV("STATUS"))) {
             handle_status(&bio, &session, tag, args);
+        } else if (sv_equal_ignore_case(cmd, SV("SEARCH"))) {
+            handle_search(&bio, &session, tag);
         } else if (sv_equal_ignore_case(cmd, SV("FETCH"))) {
             handle_fetch(&bio, &session, tag, args);
         } else if (sv_equal_ignore_case(cmd, SV("STORE"))) {
