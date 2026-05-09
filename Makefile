@@ -13,7 +13,10 @@ $(MAIN): $(MAIN).c $(OBJS)
 
 test: $(MAIN)
 	@bash tests/setup_fixture.sh
-	@bash tests/imap_tests.sh
+	@pkill -f $(MAIN) 2>/dev/null; true
+	@./$(MAIN) & SERVER_PID=$$!; sleep 0.5; \
+	  bash tests/tests.sh; STATUS=$$?; \
+	  kill $$SERVER_PID 2>/dev/null; exit $$STATUS
 
 clean:
 	rm -f $(MAIN) $(OBJS)
