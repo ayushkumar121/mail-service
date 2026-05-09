@@ -245,7 +245,7 @@ static void* handle_client(void* p) {
             rcpt_to = sv_clone(sv_split_delim(pair.second, '>').first);
             state = SMTP_STATE_RCPT_TO;
 
-            String path = tprintf(SV_Fmt "/" SV_Fmt "/inbox", SV_Arg(get_maildir()), SV_Arg(rcpt_to));
+            String path = tprintf(SV_Fmt "/" SV_Fmt "/INBOX", SV_Arg(get_maildir()), SV_Arg(rcpt_to));
             if (!file_exists(path.data)) make_directory(path.data);
 
             bufio_writeln(&bio, SV("250 OK"));
@@ -260,7 +260,7 @@ static void* handle_client(void* p) {
             String body = sv_clone(sb_to_sv(&bio.read_buf));
             body.length -= strlen(CRLF "." CRLF);
 
-            String filename = tprintf(SV_Fmt "/" SV_Fmt "/inbox/%s.eml",
+            String filename = tprintf(SV_Fmt "/" SV_Fmt "/INBOX/%s.eml",
                 SV_Arg(get_maildir()),
                 SV_Arg(rcpt_to),
                 sv_to_tmp_c(random_id()));

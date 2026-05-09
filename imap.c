@@ -497,6 +497,20 @@ static void* handle_client(void* p) {
             handle_store(&bio, &session, tag, args);
         } else if (sv_equal_ignore_case(cmd, SV("EXPUNGE"))) {
             handle_expunge(&bio, &session, tag);
+        } else if (sv_equal_ignore_case(cmd, SV("UID"))) {
+            // UID sub-commands: treat UID as sequence number (no UID store yet)
+            StringPair uid_cmd_args = sv_split_delim(sv_trim(args), ' ');
+            String uid_cmd  = sv_trim(uid_cmd_args.first);
+            String uid_args = sv_trim(uid_cmd_args.second);
+            if (sv_equal_ignore_case(uid_cmd, SV("FETCH"))) {
+                handle_fetch(&bio, &session, tag, uid_args);
+            } else if (sv_equal_ignore_case(uid_cmd, SV("SEARCH"))) {
+                handle_search(&bio, &session, tag);
+            } else if (sv_equal_ignore_case(uid_cmd, SV("STORE"))) {
+                handle_store(&bio, &session, tag, uid_args);
+            } else {
+                bufio_writeln(&bio, tprintf(SV_Fmt " BAD UID %s not supported", SV_Arg(tag), uid_cmd.data));
+            }
         } else if (sv_equal_ignore_case(cmd, SV("LOGOUT"))) {
             bufio_writeln(&bio, SV("* BYE logging out"));
             bufio_writeln(&bio, tprintf(SV_Fmt " OK LOGOUT completed", SV_Arg(tag)));
