@@ -145,20 +145,23 @@ Error handle_select(BufIO* bio, ImapSession* session, String tag, String mailbox
                           SV_Arg(session->user),
                           SV_Arg(mailbox));
 
-    int count = 0;
+    int count = 0, unseen = 0;
     DIR* dir = opendir(path.data);
     if (dir != NULL) {
         struct dirent* entry;
         while ((entry = readdir(dir)) != NULL) {
             String name = SV2(entry->d_name, strlen(entry->d_name));
-            if (sv_find(name, ".eml") != -1) count++;
+            if (sv_find(name, ".eml") == -1) continue;
+            count++;
+            MessageFlags f = parse_flags(name);
+            if (!f.seen) unseen++;
         }
         closedir(dir);
     }
 
     Error err = bufio_writeln(bio, tprintf("* %d EXISTS", count));
     if (has_error(err)) return err;
-    err = bufio_writeln(bio, SV("* 0 RECENT"));
+    err = bufio_writeln(bio, tprintf("* %d RECENT", unseen));
     if (has_error(err)) return err;
     return bufio_writeln(bio, tprintf(SV_Fmt " OK SELECT completed", SV_Arg(tag)));
 }
@@ -258,6 +261,7 @@ static Error handle_store(BufIO* bio, const ImapSession* session, String tag, St
         flags_str.length -= 2;
     }
     flags_str = sv_trim(flags_str);
+    INFO("flags_str: "SV_Fmt, SV_Arg(flags_str));
 
     char maildir_flag = imap_flag_to_maildir(flags_str);
     if (maildir_flag == 0) {
