@@ -1141,16 +1141,16 @@ Error random_bytes(char* buf, size_t n) {
     return ErrorNil;
 }
 
-String random_id(void) {
-    unsigned char raw[RANDOM_ID_LEN];
-    try(random_bytes((char*)raw, RANDOM_ID_LEN));
+String random_id(size_t n) {
+    unsigned char* raw = talloc(n);
+    try(random_bytes((char*)raw, n));
 
-    char* id = talloc(RANDOM_ID_LEN + 1);
-    for (size_t i = 0; i < RANDOM_ID_LEN; ++i) {
+    char* id = talloc(n + 1);
+    for (size_t i = 0; i < n; ++i) {
         id[i] = hex_chars[raw[i] % HEX_CHARSET_LEN];
     }
-    id[RANDOM_ID_LEN] = 0;
-    return SV2(id, RANDOM_ID_LEN);
+    id[n] = 0;
+    return SV2(id, n);
 }
 
 Error bufio_read_until(BufIO* bio, const char* terminator) {

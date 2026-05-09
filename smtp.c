@@ -8,6 +8,7 @@
 #include <sys/socket.h>
 #include <netdb.h>
 #include <pthread.h>
+#include <time.h>
 #include <unistd.h>
 
 #include "config.h"
@@ -214,6 +215,7 @@ static void* handle_client(void* p) {
     SmtpSessionState state = SMTP_STATE_CONNECTED;
     String mail_from = StringNil;
     String rcpt_to = StringNil;
+    String ehlo_host = StringNil;
 
     // Greeting
     bufio_writeln(&bio, tprintf("220 " SV_Fmt " ESMTP ready", SV_Arg(get_hostname())));
@@ -232,6 +234,8 @@ static void* handle_client(void* p) {
 
         if (sv_equal_ignore_case(cmd, SV("EHLO")) || sv_equal_ignore_case(cmd, SV("HELO"))) {
             state = SMTP_STATE_GREETED;
+            safe_free(ehlo_host.data);
+            ehlo_host = sv_clone(rest);
             bufio_writeln(&bio, tprintf("250 " SV_Fmt " greets " SV_Fmt, SV_Arg(get_hostname()), SV_Arg(rest)));
 
         } else if (sv_equal_ignore_case(cmd, SV("MAIL"))) {
@@ -260,10 +264,13 @@ static void* handle_client(void* p) {
             String body = sv_clone(sb_to_sv(&bio.read_buf));
             body.length -= strlen(CRLF "." CRLF);
 
-            String filename = tprintf(SV_Fmt "/" SV_Fmt "/INBOX/%s.eml",
+            String sender_host = ehlo_host.length > 0 ? ehlo_host : SV("localhost");
+            String filename = tprintf(SV_Fmt "/" SV_Fmt "/INBOX/%ld.%s." SV_Fmt ".eml",
                 SV_Arg(get_maildir()),
                 SV_Arg(rcpt_to),
-                sv_to_tmp_c(random_id()));
+                (long)time(NULL),
+                sv_to_tmp_c(random_id(RANDOM_ID_LEN)),
+                SV_Arg(sender_host));
             write_entire_file(filename.data, body);
 
             bufio_writeln(&bio, SV("250 OK queued"));
@@ -279,6 +286,7 @@ static void* handle_client(void* p) {
 
     safe_free(mail_from.data);
     safe_free(rcpt_to.data);
+    safe_free(ehlo_host.data);
     bufio_close(&bio);
     return NULL;
 }

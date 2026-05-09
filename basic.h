@@ -248,7 +248,8 @@ Error make_directory(const char* path);
 
 Error random_bytes(char* buf, size_t n);
 
-String random_id(void);
+// Allocated in temp buffer should be cloned for long lived objects
+String random_id(size_t n);
 
 // BUF IO
 
