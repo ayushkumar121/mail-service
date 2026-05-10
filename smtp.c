@@ -125,78 +125,53 @@ Error smtp_expect_response(BufIO* bio, int expected) {
     return ErrorNil;
 }
 
-Error smtp_send(const Email email) {
-    Error err;
-    const String domain = sv_split_delim(email.to, '@').second;
+Error smtp_deliver(String from, String to, String raw_msg) {
+    String domain = sv_split_delim(to, '@').second;
+    if (domain.length == 0) return errorf("relay: no domain in '" SV_Fmt "'", SV_Arg(to));
 
-    String smtp_server;
-    int smtp_port = 25;
-
-    if (sv_equal(domain, SV("localhost"))) {
-        smtp_server = domain;
-    } else {
-        StringBuilder builder = {0};
-        err = smtp_lookup_server(domain, &builder);
-        if (has_error(err)) return err;
-        smtp_server = sb_to_sv(&builder);
-    }
-
-    // TODO: TLS
+    StringBuilder mx = {0};
+    Error err = smtp_lookup_server(domain, &mx);
+    if (has_error(err)) return err;
+    String host = sb_to_sv(&mx);
+    INFO("MX " SV_Fmt " -> " SV_Fmt, SV_Arg(domain), SV_Arg(host));
 
     BufIO bio = {0};
-    err = smtp_connect(&bio, smtp_server, smtp_port);
-    if (has_error(err)) return err;
-
-    err = smtp_expect_response(&bio, 220);
-    if (has_error(err)) return err;
+    err = smtp_connect(&bio, host, 25);
+    if (has_error(err)) { sb_free(&mx); return err; }
+    err = smtp_expect_response(&bio, 220); if (has_error(err)) return err;
 
     err = bufio_send_line(&bio, tprintf("EHLO " SV_Fmt, SV_Arg(get_hostname())));
     if (has_error(err)) return err;
-    err = smtp_expect_response(&bio, 250);
-    if (has_error(err)) return err;
+    err = smtp_expect_response(&bio, 250); if (has_error(err)) return err;
 
-    // 1. MAIL FROM
-    err = bufio_send_line(&bio, tprintf("MAIL FROM:<" SV_Fmt ">", SV_Arg(email.from)));
+    err = bufio_send_line(&bio, tprintf("MAIL FROM:<" SV_Fmt ">", SV_Arg(from)));
     if (has_error(err)) return err;
-    err = smtp_expect_response(&bio, 250);
-    if (has_error(err)) return err;
+    err = smtp_expect_response(&bio, 250); if (has_error(err)) return err;
 
-    // 2. RCPT TO
-    err = bufio_send_line(&bio, tprintf("RCPT TO:<" SV_Fmt ">", SV_Arg(email.to)));
+    err = bufio_send_line(&bio, tprintf("RCPT TO:<" SV_Fmt ">", SV_Arg(to)));
     if (has_error(err)) return err;
-    err = smtp_expect_response(&bio, 250);
-    if (has_error(err)) return err;
+    err = smtp_expect_response(&bio, 250); if (has_error(err)) return err;
 
-    // 3. DATA
     err = bufio_send_line(&bio, SV("DATA"));
     if (has_error(err)) return err;
-    err = smtp_expect_response(&bio, 354);
-    if (has_error(err)) return err;
+    err = smtp_expect_response(&bio, 354); if (has_error(err)) return err;
 
-    // 4. Headers + body
-    err = bufio_send_line(&bio, tprintf("From: " SV_Fmt, SV_Arg(email.from)));
+    err = bufio_send(&bio, raw_msg);
     if (has_error(err)) return err;
-    err = bufio_send_line(&bio, tprintf("To: " SV_Fmt, SV_Arg(email.to)));
-    if (has_error(err)) return err;
-    err = bufio_send_line(&bio, tprintf("Subject: " SV_Fmt, SV_Arg(email.subject)));
-    if (has_error(err)) return err;
-    err = bufio_send_line(&bio, SV(""));
-    if (has_error(err)) return err;
-    err = bufio_send_line(&bio, email.body);
-    if (has_error(err)) return err;
-
-    // 5. End with dot
+    // Ensure body ended with CRLF before the terminating "." line.
+    if (raw_msg.length < 2 ||
+        raw_msg.data[raw_msg.length - 2] != '\r' ||
+        raw_msg.data[raw_msg.length - 1] != '\n') {
+        err = bufio_send(&bio, SV("\r\n"));
+        if (has_error(err)) return err;
+    }
     err = bufio_send_line(&bio, SV("."));
     if (has_error(err)) return err;
-    err = smtp_expect_response(&bio, 250);
-    if (has_error(err)) return err;
+    err = smtp_expect_response(&bio, 250); if (has_error(err)) return err;
 
-    // 6. Quit
-    err = bufio_send_line(&bio, SV("QUIT"));
-    if (has_error(err)) return err;
-
+    bufio_send_line(&bio, SV("QUIT"));
     bufio_close(&bio);
-    DEBUG("Message sent");
+    sb_free(&mx);
     return ErrorNil;
 }
 
@@ -251,10 +226,7 @@ static void* handle_client(void* p) {
             const StringPair pair = sv_split_delim(rest, '<');
             rcpt_to = sv_clone(sv_split_delim(pair.second, '>').first);
             state = SMTP_STATE_RCPT_TO;
-
-            String path = tprintf(SV_Fmt "/" SV_Fmt "/INBOX", SV_Arg(get_maildir()), SV_Arg(rcpt_to));
-            if (!file_exists(path.data)) make_directory(path.data);
-
+            // Don't pre-create maildir here — only do it if delivery is local.
             bufio_send_line(&bio, SV("250 OK"));
 
         } else if (sv_equal_ignore_case(cmd, SV("DATA"))) {
@@ -267,19 +239,35 @@ static void* handle_client(void* p) {
             String body = sv_clone(sb_to_sv(&bio.read_buf));
             body.length -= strlen(CRLF "." CRLF);
 
-            String sender_host = ehlo_host.length > 0 ? ehlo_host : SV("localhost");
-            String inbox = tprintf(SV_Fmt "/" SV_Fmt "/INBOX",
-                                   SV_Arg(get_maildir()), SV_Arg(rcpt_to));
-            int uid = next_uid(inbox.data);
-            String filename = tprintf(SV_Fmt "/%ld.%s." SV_Fmt ";U=%d.eml",
-                SV_Arg(inbox),
-                (long)time(NULL),
-                sv_to_tmp_c(random_id(RANDOM_ID_LEN)),
-                SV_Arg(sender_host),
-                uid);
-            write_entire_file(filename.data, body);
+            String rcpt_domain = sv_split_delim(rcpt_to, '@').second;
+            bool is_local = sv_equal_ignore_case(rcpt_domain, get_hostname())
+                         || sv_equal_ignore_case(rcpt_domain, SV("localhost"));
 
-            bufio_send_line(&bio, SV("250 OK queued"));
+            if (is_local) {
+                String sender_host = ehlo_host.length > 0 ? ehlo_host : SV("localhost");
+                String inbox = tprintf(SV_Fmt "/" SV_Fmt "/INBOX",
+                                       SV_Arg(get_maildir()), SV_Arg(rcpt_to));
+                if (!file_exists(inbox.data)) make_directory(inbox.data);
+                int uid = next_uid(inbox.data);
+                String filename = tprintf(SV_Fmt "/%ld.%s." SV_Fmt ";U=%d.eml",
+                    SV_Arg(inbox),
+                    (long)time(NULL),
+                    sv_to_tmp_c(random_id(RANDOM_ID_LEN)),
+                    SV_Arg(sender_host),
+                    uid);
+                write_entire_file(filename.data, body);
+                bufio_send_line(&bio, SV("250 OK queued"));
+            } else {
+                INFO("relaying " SV_Fmt " from " SV_Fmt, SV_Arg(rcpt_to), SV_Arg(mail_from));
+                Error rerr = smtp_deliver(mail_from, rcpt_to, body);
+                if (has_error(rerr)) {
+                    ERROR("relay failed: " SV_Fmt, SV_Arg(rerr.message));
+                    bufio_send_line(&bio, SV("451 relay failed; try later"));
+                } else {
+                    bufio_send_line(&bio, SV("250 OK relayed"));
+                }
+            }
+            safe_free(body.data);
 
         } else if (sv_equal_ignore_case(cmd, SV("QUIT"))) {
             state = SMTP_STATE_QUIT;
