@@ -127,7 +127,7 @@ Error smtp_expect_response(BufIO* bio, int expected) {
 
 Error smtp_deliver(String from, String to, String raw_msg) {
     String domain = sv_split_delim(to, '@').second;
-    if (domain.length == 0) return errorf("relay: no domain in '" SV_Fmt "'", SV_Arg(to));
+    if (domain.length == 0) return errorf("deliver: no domain in '" SV_Fmt "'", SV_Arg(to));
 
     StringBuilder mx = {0};
     Error err = smtp_lookup_server(domain, &mx);
@@ -258,13 +258,13 @@ static void* handle_client(void* p) {
                 write_entire_file(filename.data, body);
                 bufio_send_line(&bio, SV("250 OK queued"));
             } else {
-                INFO("relaying " SV_Fmt " from " SV_Fmt, SV_Arg(rcpt_to), SV_Arg(mail_from));
+                INFO("delivering to " SV_Fmt " from " SV_Fmt, SV_Arg(rcpt_to), SV_Arg(mail_from));
                 Error rerr = smtp_deliver(mail_from, rcpt_to, body);
                 if (has_error(rerr)) {
-                    ERROR("relay failed: " SV_Fmt, SV_Arg(rerr.message));
-                    bufio_send_line(&bio, SV("451 relay failed; try later"));
+                    ERROR("delivery failed: " SV_Fmt, SV_Arg(rerr.message));
+                    bufio_send_line(&bio, SV("451 delivery failed; try later"));
                 } else {
-                    bufio_send_line(&bio, SV("250 OK relayed"));
+                    bufio_send_line(&bio, SV("250 OK delivered"));
                 }
             }
             safe_free(body.data);
