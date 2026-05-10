@@ -12,6 +12,13 @@ IMAP_URL="imap://$HOST:$PORT"
 PASS_COUNT=0
 FAIL_COUNT=0
 
+# Wait until the IMAP port accepts connections (avoids flakes when the
+# server is still binding when the first test fires).
+for i in $(seq 1 50); do
+    if (echo > /dev/tcp/$HOST/$PORT) 2>/dev/null; then break; fi
+    sleep 0.1
+done
+
 run_test() {
     local name="$1"
     local expected="$2"
