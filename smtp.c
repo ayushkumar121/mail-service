@@ -125,7 +125,7 @@ Error smtp_expect_response(BufIO* bio, int expected) {
     return ErrorNil;
 }
 
-Error smtp_relay(String from, String to, String raw_msg) {
+Error smtp_deliver(String from, String to, String raw_msg) {
     String domain = sv_split_delim(to, '@').second;
     if (domain.length == 0) return errorf("relay: no domain in '" SV_Fmt "'", SV_Arg(to));
 
@@ -259,7 +259,7 @@ static void* handle_client(void* p) {
                 bufio_send_line(&bio, SV("250 OK queued"));
             } else {
                 INFO("relaying " SV_Fmt " from " SV_Fmt, SV_Arg(rcpt_to), SV_Arg(mail_from));
-                Error rerr = smtp_relay(mail_from, rcpt_to, body);
+                Error rerr = smtp_deliver(mail_from, rcpt_to, body);
                 if (has_error(rerr)) {
                     ERROR("relay failed: " SV_Fmt, SV_Arg(rerr.message));
                     bufio_send_line(&bio, SV("451 relay failed; try later"));
