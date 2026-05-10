@@ -229,11 +229,19 @@ static Error handle_select(BufIO* bio, ImapSession* session, String tag, String 
         closedir(dir);
     }
 
-    Error err = bufio_writeln(bio, tprintf("* %d EXISTS", count));
+    Error err = bufio_writeln(bio, SV("* FLAGS (\\Seen \\Answered \\Flagged \\Deleted \\Draft)"));
+    if (has_error(err)) return err;
+    err = bufio_writeln(bio, tprintf("* %d EXISTS", count));
     if (has_error(err)) return err;
     err = bufio_writeln(bio, tprintf("* %d RECENT", unseen));
     if (has_error(err)) return err;
-    return bufio_writeln(bio, tprintf(SV_Fmt " OK SELECT completed", SV_Arg(tag)));
+    err = bufio_writeln(bio, SV("* OK [UIDVALIDITY 1] UIDs valid"));
+    if (has_error(err)) return err;
+    err = bufio_writeln(bio, tprintf("* OK [UIDNEXT %d] Predicted next UID", count + 1));
+    if (has_error(err)) return err;
+    err = bufio_writeln(bio, SV("* OK [PERMANENTFLAGS (\\Seen \\Answered \\Flagged \\Deleted \\Draft)] Limited"));
+    if (has_error(err)) return err;
+    return bufio_writeln(bio, tprintf(SV_Fmt " OK [READ-WRITE] SELECT completed", SV_Arg(tag)));
 }
 
 static void handle_subscribe(BufIO* bio, ImapSession* session, String tag, String args) {
@@ -250,7 +258,78 @@ typedef struct {
     bool peek;
     bool size;
     bool internaldate;
+    String section;  // raw spec inside BODY[...] — e.g. "" for BODY[], "HEADER.FIELDS (From To)" otherwise
 } FetchItems;
+
+// Returns the headers portion of an RFC 822 message including the trailing blank-line CRLF.
+static String extract_headers(String body) {
+    ssize_t end = sv_find(body, "\r\n\r\n");
+    if (end >= 0) return SV2(body.data, (size_t)end + 4);
+    end = sv_find(body, "\n\n");
+    if (end >= 0) return SV2(body.data, (size_t)end + 2);
+    return body;
+}
+
+static String extract_text(String body) {
+    ssize_t end = sv_find(body, "\r\n\r\n");
+    if (end >= 0) return SV2(body.data + end + 4, body.length - (size_t)end - 4);
+    end = sv_find(body, "\n\n");
+    if (end >= 0) return SV2(body.data + end + 2, body.length - (size_t)end - 2);
+    return SV("");
+}
+
+static bool header_name_in_list(String name, String list) {
+    size_t i = 0;
+    while (i < list.length) {
+        while (i < list.length && (list.data[i] == ' ' || list.data[i] == '\t')) i++;
+        size_t s = i;
+        while (i < list.length && list.data[i] != ' ' && list.data[i] != '\t') i++;
+        String tok = SV2(list.data + s, i - s);
+        if (tok.length > 0 && sv_equal_ignore_case(tok, name)) return true;
+    }
+    return false;
+}
+
+// Filter headers to those whose names appear in fields_list (which may be wrapped in parens).
+// Returns a tprintf-allocated buffer.
+static String filter_header_fields(String body, String fields_list) {
+    fields_list = sv_trim(fields_list);
+    if (fields_list.length >= 2 && fields_list.data[0] == '(' && fields_list.data[fields_list.length-1] == ')') {
+        fields_list = sv_trim(SV2(fields_list.data + 1, fields_list.length - 2));
+    }
+    String headers = extract_headers(body);
+    StringBuilder out = {0};
+    size_t i = 0;
+    bool keep_cont = false;
+    while (i < headers.length) {
+        size_t ls = i;
+        while (i < headers.length && headers.data[i] != '\n') i++;
+        if (i < headers.length) i++;
+        String line = SV2(headers.data + ls, i - ls);
+        if (line.length == 0) break;
+        bool blank = (line.length == 2 && line.data[0] == '\r' && line.data[1] == '\n')
+                  || (line.length == 1 && line.data[0] == '\n');
+        if (blank) break;
+        bool cont = (line.data[0] == ' ' || line.data[0] == '\t');
+        if (cont) {
+            if (keep_cont) sb_push_sv(&out, line);
+            continue;
+        }
+        ssize_t colon = sv_find(line, ":");
+        if (colon < 0) { keep_cont = false; continue; }
+        String name = sv_trim(SV2(line.data, (size_t)colon));
+        if (header_name_in_list(name, fields_list)) {
+            sb_push_sv(&out, line);
+            keep_cont = true;
+        } else {
+            keep_cont = false;
+        }
+    }
+    sb_push_sv(&out, SV("\r\n"));
+    String result = tprintf("%.*s", (int)out.length, out.data);
+    sb_free(&out);
+    return result;
+}
 
 static FetchItems parse_fetch_items(String s, bool force_uid) {
     FetchItems fi = {0};
@@ -288,9 +367,13 @@ static FetchItems parse_fetch_items(String s, bool force_uid) {
         else if (sv_equal_ignore_case(tok, SV("RFC822"))) { fi.body = true; }
         else if (tok.length >= 5 && sv_equal_ignore_case(SV2(tok.data, 5), SV("BODY["))) {
             fi.body = true;
+            ssize_t rb = sv_find(tok, "]");
+            fi.section = rb > 5 ? SV2(tok.data + 5, (size_t)rb - 5) : SV("");
         }
         else if (tok.length >= 10 && sv_equal_ignore_case(SV2(tok.data, 10), SV("BODY.PEEK["))) {
             fi.body = true; fi.peek = true;
+            ssize_t rb = sv_find(tok, "]");
+            fi.section = rb > 10 ? SV2(tok.data + 10, (size_t)rb - 10) : SV("");
         }
     }
     if (force_uid) fi.uid = true;
@@ -426,14 +509,34 @@ static Error handle_fetch_ex(BufIO* bio, const ImapSession* session, String tag,
             first = false;
         }
         if (fi.body) {
+            // Compute the data slice corresponding to fi.section
+            String full = sb_to_sv(&body_sb);
+            String body_data = full;
+            String sec = fi.section;
+            if (sec.length == 0) {
+                body_data = full;
+            } else if (sv_equal_ignore_case(sec, SV("HEADER"))) {
+                body_data = extract_headers(full);
+            } else if (sv_equal_ignore_case(sec, SV("TEXT"))) {
+                body_data = extract_text(full);
+            } else if (sec.length >= 13 &&
+                       sv_equal_ignore_case(SV2(sec.data, 13), SV("HEADER.FIELDS"))) {
+                String fields = sv_trim(SV2(sec.data + 13, sec.length - 13));
+                // HEADER.FIELDS.NOT not supported — fall back to filter as include list
+                if (fields.length > 4 && sv_equal_ignore_case(SV2(fields.data, 4), SV(".NOT"))) {
+                    fields = sv_trim(SV2(fields.data + 4, fields.length - 4));
+                }
+                body_data = filter_header_fields(full, fields);
+            }
+
             if (!first) sb_push_char(&line, ' ');
-            sb_push_sv(&line, tprintf("BODY[] {%zu}", body_sb.length));
-            // emit prefix line, body literal, then closing paren
+            sb_push_sv(&line, tprintf("BODY[" SV_Fmt "] {%zu}",
+                                      SV_Arg(sec), body_data.length));
             sb_push_sv(&line, SV("\r\n"));
             err = bufio_write(bio, sb_to_sv(&line));
             sb_free(&line);
             if (has_error(err)) { sb_free(&body_sb); goto cleanup; }
-            err = bufio_write(bio, sb_to_sv(&body_sb));
+            err = bufio_write(bio, body_data);
             sb_free(&body_sb);
             if (has_error(err)) goto cleanup;
             err = bufio_writeln(bio, SV(")"));
@@ -461,10 +564,55 @@ static Error handle_fetch(BufIO* bio, const ImapSession* session, String tag, St
     return handle_fetch_ex(bio, session, tag, args, false);
 }
 
+// CLOSE: silently expunge \Deleted messages and unselect the mailbox.
+// Unlike EXPUNGE, no untagged * EXPUNGE responses are sent.
+static Error handle_close(BufIO* bio, ImapSession* session, String tag) {
+    if (session->selected_mailbox.length > 0) {
+        String dir_path = tprintf(SV_Fmt "/" SV_Fmt "/" SV_Fmt,
+                                  SV_Arg(get_maildir()),
+                                  SV_Arg(session->user),
+                                  SV_Arg(session->selected_mailbox));
+        DIR* dir = opendir(dir_path.data);
+        if (dir != NULL) {
+            struct dirent* entry;
+            while ((entry = readdir(dir)) != NULL) {
+                String name = SV2(entry->d_name, strlen(entry->d_name));
+                if (sv_find(name, ".eml") == -1) continue;
+                if (parse_flags(name).deleted) {
+                    String full = tprintf(SV_Fmt "/" SV_Fmt, SV_Arg(dir_path), SV_Arg(name));
+                    remove(full.data);
+                }
+            }
+            closedir(dir);
+        }
+    }
+    safe_free(session->selected_mailbox.data);
+    session->selected_mailbox = StringNil;
+    session->state = IMAP_STATE_AUTHENTICATED;
+    return bufio_writeln(bio, tprintf(SV_Fmt " OK CLOSE completed", SV_Arg(tag)));
+}
+
 static Error handle_status(BufIO* bio, const ImapSession* session, String tag, String args) {
-    // args: "INBOX (MESSAGES UNSEEN RECENT)" — extract mailbox name (first token)
-    StringPair pair = sv_split_delim(sv_trim(args), ' ');
-    String mailbox = sv_trim(pair.first);
+    // args: e.g. `"Test" (UIDNEXT MESSAGES UNSEEN RECENT)`
+    args = sv_trim(args);
+    String mailbox;
+    String items;
+    if (args.length > 0 && args.data[0] == '"') {
+        ssize_t eq = -1;
+        for (size_t i = 1; i < args.length; i++) {
+            if (args.data[i] == '"') { eq = (ssize_t)i; break; }
+        }
+        if (eq < 0) return bufio_writeln(bio, tprintf(SV_Fmt " BAD unterminated mailbox", SV_Arg(tag)));
+        mailbox = SV2(args.data + 1, (size_t)eq - 1);
+        items = sv_trim(SV2(args.data + eq + 1, args.length - (size_t)eq - 1));
+    } else {
+        StringPair pair = sv_split_delim(args, ' ');
+        mailbox = sv_trim(pair.first);
+        items = sv_trim(pair.second);
+    }
+    if (items.length >= 2 && items.data[0] == '(' && items.data[items.length-1] == ')') {
+        items = SV2(items.data + 1, items.length - 2);
+    }
 
     String path = tprintf(SV_Fmt "/" SV_Fmt "/" SV_Fmt,
                           SV_Arg(get_maildir()),
@@ -485,8 +633,29 @@ static Error handle_status(BufIO* bio, const ImapSession* session, String tag, S
         closedir(dir);
     }
 
-    Error err = bufio_writeln(bio, tprintf("* STATUS " SV_Fmt " (MESSAGES %d UNSEEN %d RECENT 0)",
-                                           SV_Arg(mailbox), total, unseen));
+    StringBuilder out = {0};
+    sb_push_sv(&out, tprintf("* STATUS \"" SV_Fmt "\" (", SV_Arg(mailbox)));
+    bool first = true;
+    size_t i = 0;
+    while (i < items.length) {
+        while (i < items.length && (items.data[i] == ' ' || items.data[i] == '\t')) i++;
+        size_t s = i;
+        while (i < items.length && items.data[i] != ' ' && items.data[i] != '\t') i++;
+        String tok = SV2(items.data + s, i - s);
+        if (tok.length == 0) continue;
+        if (!first) sb_push_char(&out, ' ');
+        if (sv_equal_ignore_case(tok, SV("MESSAGES")))         sb_push_sv(&out, tprintf("MESSAGES %d", total));
+        else if (sv_equal_ignore_case(tok, SV("RECENT")))      sb_push_sv(&out, tprintf("RECENT %d", unseen));
+        else if (sv_equal_ignore_case(tok, SV("UNSEEN")))      sb_push_sv(&out, tprintf("UNSEEN %d", unseen));
+        else if (sv_equal_ignore_case(tok, SV("UIDNEXT")))     sb_push_sv(&out, tprintf("UIDNEXT %d", total + 1));
+        else if (sv_equal_ignore_case(tok, SV("UIDVALIDITY"))) sb_push_sv(&out, SV("UIDVALIDITY 1"));
+        else { sb_push_sv(&out, tok); sb_push_sv(&out, SV(" 0")); }
+        first = false;
+    }
+    sb_push_char(&out, ')');
+
+    Error err = bufio_writeln(bio, sb_to_sv(&out));
+    sb_free(&out);
     if (has_error(err)) return err;
     return bufio_writeln(bio, tprintf(SV_Fmt " OK STATUS completed", SV_Arg(tag)));
 }
@@ -507,7 +676,6 @@ static Error handle_store(BufIO* bio, const ImapSession* session, String tag, St
         flags_str.length -= 2;
     }
     flags_str = sv_trim(flags_str);
-    INFO("flags_str: "SV_Fmt, SV_Arg(flags_str));
 
     char maildir_flag = imap_flag_to_maildir(flags_str);
     if (maildir_flag == 0) {
@@ -603,8 +771,11 @@ static Error handle_expunge(BufIO* bio, const ImapSession* session, String tag) 
     return bufio_writeln(bio, tprintf(SV_Fmt " OK EXPUNGE completed", SV_Arg(tag)));
 }
 
-static Error handle_append(BufIO* bio, const ImapSession* session, String tag, String args) {
-    args = sv_trim(args);
+static Error handle_append(BufIO* bio, const ImapSession* session, String tag_in, String args) {
+    // tag_in and args point into bio->read_buf, which bufio_read_n will clobber.
+    // Snapshot everything we need from the request line before reading the literal.
+    String tag = tprintf(SV_Fmt, SV_Arg(tag_in));
+    args = tprintf(SV_Fmt, SV_Arg(sv_trim(args)));
 
     ssize_t lbrace = sv_find(args, "{");
     ssize_t rbrace = sv_find(args, "}");
@@ -672,7 +843,13 @@ static Error handle_append(BufIO* bio, const ImapSession* session, String tag, S
     String dir_path = tprintf(SV_Fmt "/" SV_Fmt "/" SV_Fmt,
                               SV_Arg(get_maildir()), SV_Arg(session->user), SV_Arg(mailbox));
     if (!file_exists(dir_path.data)) {
-        return bufio_writeln(bio, tprintf(SV_Fmt " NO [TRYCREATE] mailbox does not exist", SV_Arg(tag)));
+        // Auto-create — Thunderbird does not always retry on [TRYCREATE]
+        String user_dir = tprintf(SV_Fmt "/" SV_Fmt, SV_Arg(get_maildir()), SV_Arg(session->user));
+        mkdir(user_dir.data, 0700);
+        if (mkdir(dir_path.data, 0700) != 0 && errno != EEXIST) {
+            return bufio_writeln(bio, tprintf(SV_Fmt " NO failed to create mailbox: %s",
+                                              SV_Arg(tag), strerror(errno)));
+        }
     }
 
     Error err = bufio_writeln(bio, SV("+ Ready for literal data"));
@@ -709,13 +886,14 @@ static Error handle_append(BufIO* bio, const ImapSession* session, String tag, S
     if (flags.seen)    flag_chars[n++] = 'S';
     if (flags.deleted) flag_chars[n++] = 'T';
 
+    String host = get_hostname();
     String filename = n > 0
-        ? tprintf(SV_Fmt "/%ld." SV_Fmt ".eml:2,%s",
+        ? tprintf(SV_Fmt "/%ld." SV_Fmt "." SV_Fmt ".eml:2,%s",
                   SV_Arg(dir_path), (long)time(NULL),
-                  SV_Arg(random_id(RANDOM_ID_LEN)), flag_chars)
-        : tprintf(SV_Fmt "/%ld." SV_Fmt ".eml",
+                  SV_Arg(random_id(RANDOM_ID_LEN)), SV_Arg(host), flag_chars)
+        : tprintf(SV_Fmt "/%ld." SV_Fmt "." SV_Fmt ".eml",
                   SV_Arg(dir_path), (long)time(NULL),
-                  SV_Arg(random_id(RANDOM_ID_LEN)));
+                  SV_Arg(random_id(RANDOM_ID_LEN)), SV_Arg(host));
 
     err = write_entire_file(filename.data, body);
     safe_free(body.data);
@@ -880,8 +1058,6 @@ static void* handle_client(void* p) {
             handle_list(&bio, &session, tag, args);
         } else if (sv_equal_ignore_case(cmd, SV("LSUB"))) {
             handle_lsub(&bio, &session, tag, args);
-        } else if (sv_equal_ignore_case(cmd, SV("LSUB"))) {
-            handle_lsub(&bio, &session, tag, args);
         } else if (sv_equal_ignore_case(cmd, SV("SUBSCRIBE"))) {
             handle_subscribe(&bio, &session, tag, args);
         } else if (sv_equal_ignore_case(cmd, SV("UNSUBSCRIBE"))) {
@@ -908,6 +1084,8 @@ static void* handle_client(void* p) {
             handle_store(&bio, &session, tag, args);
         } else if (sv_equal_ignore_case(cmd, SV("EXPUNGE"))) {
             handle_expunge(&bio, &session, tag);
+        } else if (sv_equal_ignore_case(cmd, SV("CLOSE"))) {
+            handle_close(&bio, &session, tag);
         } else if (sv_equal_ignore_case(cmd, SV("UID"))) {
             // UID sub-commands: treat UID as sequence number (no UID store yet)
             StringPair uid_cmd_args = sv_split_delim(sv_trim(args), ' ');

@@ -82,7 +82,7 @@ run_test "L5  LIST %: INBOX present"             "INBOX"           "$T"
 
 # | 5 | SELECT INBOX (curl sends LIST for folder URLs, so use nc for SELECT)
 T=$(nc_send $"a1 LOGIN $USER $PASS\r\na2 SELECT INBOX\r\na3 LOGOUT\r\n")
-run_test "5  SELECT: OK SELECT"               "OK SELECT"       "$T"
+run_test "5  SELECT: OK SELECT"               "SELECT completed" "$T"
 run_test "5b SELECT: EXISTS count"            "EXISTS"          "$T"
 
 # | 6 | FETCH message 1
@@ -202,9 +202,18 @@ else
     FAIL_COUNT=$((FAIL_COUNT + 1))
 fi
 
-# | A2 | APPEND to nonexistent mailbox
-T=$(printf '%b' "a1 LOGIN $USER $PASS\r\na2 APPEND Nope {5}\r\nhello\r\na3 LOGOUT\r\n" | nc "$HOST" "$PORT" 2>/dev/null)
-run_test "A2  APPEND missing: TRYCREATE"       "TRYCREATE"       "$T"
+# | A2 | APPEND to nonexistent mailbox auto-creates
+rm -rf "$(dirname "$0")/../maildir/$USER/Auto"
+T=$(printf '%b' "a1 LOGIN $USER $PASS\r\na2 APPEND Auto {5}\r\nhello\r\na3 LOGOUT\r\n" | nc "$HOST" "$PORT" 2>/dev/null)
+run_test "A2  APPEND missing: auto-created"    "OK APPEND"       "$T"
+if [ -d "$(dirname "$0")/../maildir/$USER/Auto" ]; then
+    echo "PASS  A2b APPEND: auto-created folder on disk"
+    PASS_COUNT=$((PASS_COUNT + 1))
+else
+    echo "FAIL  A2b APPEND: folder not auto-created"
+    FAIL_COUNT=$((FAIL_COUNT + 1))
+fi
+rm -rf "$(dirname "$0")/../maildir/$USER/Auto"
 
 nc_send $"a1 LOGIN $USER $PASS\r\na2 DELETE Drafts\r\na3 LOGOUT\r\n" >/dev/null
 

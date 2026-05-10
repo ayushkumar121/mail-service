@@ -1,4 +1,5 @@
 #include <pthread.h>
+#include <signal.h>
 
 #include "basic.h"
 #include "config.h"
@@ -12,6 +13,9 @@ void* smtp_thread(void* arg) {
 }
 
 int main(int argc, char** argv) {
+  // Don't crash when a peer closes the connection mid-write.
+  signal(SIGPIPE, SIG_IGN);
+
   try(config_load("config.json"));
 
   INFO("Setting up maildir: "SV_Fmt, SV_Arg(get_maildir()));

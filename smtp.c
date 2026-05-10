@@ -220,6 +220,8 @@ static void* handle_client(void* p) {
     // Greeting
     bufio_writeln(&bio, tprintf("220 " SV_Fmt " ESMTP ready", SV_Arg(get_hostname())));
 
+    INFO("SMTP: client connected");
+
     while (state != SMTP_STATE_QUIT) {
         Error err = bufio_read_until(&bio, CRLF);
         if (has_error(err)) {
