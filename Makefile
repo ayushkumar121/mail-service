@@ -1,7 +1,7 @@
 MAIN=mail-service
 CC=cc
 CFLAGS=-Wall -g -D_GNU_SOURCE
-LIBS= -lresolv
+LIBS= -lresolv -lm
 
 OBJS=http.o basic.o config.o maildir.o smtp.o imap.o
 
