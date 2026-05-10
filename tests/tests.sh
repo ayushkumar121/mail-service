@@ -198,7 +198,7 @@ APPEND_LEN=${#APPEND_BODY}
 nc_send $"a1 LOGIN $USER $PASS\r\na2 CREATE Drafts\r\na3 LOGOUT\r\n" >/dev/null
 T=$(printf '%b' "a1 LOGIN $USER $PASS\r\na2 APPEND Drafts (\\\\Seen) {$APPEND_LEN}\r\n${APPEND_BODY}\r\na3 LOGOUT\r\n" | nc "$HOST" "$PORT" 2>/dev/null)
 run_test "A1  APPEND: + continuation"          "+ Ready"         "$T"
-run_test "A1b APPEND: OK APPEND"               "OK APPEND"       "$T"
+run_test "A1b APPEND: OK APPEND"               "APPEND completed"       "$T"
 APPEND_FILE=$(ls "$(dirname "$0")/../maildir/$USER/Drafts" 2>/dev/null | grep "F=[^,.]*S" | head -1)
 if [ -n "$APPEND_FILE" ]; then
     echo "PASS  A1c APPEND: file written with F=...S... ($APPEND_FILE)"
@@ -212,7 +212,7 @@ fi
 # | A2 | APPEND to nonexistent mailbox auto-creates
 rm -rf "$(dirname "$0")/../maildir/$USER/Auto"
 T=$(printf '%b' "a1 LOGIN $USER $PASS\r\na2 APPEND Auto {5}\r\nhello\r\na3 LOGOUT\r\n" | nc "$HOST" "$PORT" 2>/dev/null)
-run_test "A2  APPEND missing: auto-created"    "OK APPEND"       "$T"
+run_test "A2  APPEND missing: auto-created"    "APPEND completed"       "$T"
 if [ -d "$(dirname "$0")/../maildir/$USER/Auto" ]; then
     echo "PASS  A2b APPEND: auto-created folder on disk"
     PASS_COUNT=$((PASS_COUNT + 1))

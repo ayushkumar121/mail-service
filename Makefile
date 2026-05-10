@@ -12,9 +12,9 @@ $(MAIN): $(MAIN).c $(OBJS)
 	$(CC) -c -o $@ $< $(CFLAGS)
 
 test: $(MAIN)
+	@pkill -f $(MAIN) 2>/dev/null; sleep 0.3; true
 	@bash tests/setup_fixture.sh
-	@pkill -f $(MAIN) 2>/dev/null; true
-	@./$(MAIN) & SERVER_PID=$$!; sleep 1; \
+	@./$(MAIN) > /tmp/mail-service.log 2>&1 & SERVER_PID=$$!; \
 	  bash tests/tests.sh; STATUS=$$?; \
 	  kill $$SERVER_PID 2>/dev/null; exit $$STATUS
 

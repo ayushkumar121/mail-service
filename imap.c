@@ -15,7 +15,7 @@
 #define IMAP_SOCKET_BACKLOG 1024
 #define IMAP_DEFAULT_PORT 143
 #define CRLF "\r\n"
-#define IMAP_CAPABILITY "IMAP4rev1"
+#define IMAP_CAPABILITY "IMAP4rev1 UIDPLUS"
 
 typedef enum {
     IMAP_STATE_NOT_AUTHENTICATED,
@@ -75,7 +75,7 @@ static String strip_quotes(String s) {
 Error handle_login(BufIO* bio, ImapSession* session, String tag, String args) {
     // TODO: real password check
     StringPair pair = sv_split_delim(args, ' ');
-    session->user = strip_quotes(sv_clone(sv_trim(pair.first)));
+    session->user = sv_clone(strip_quotes(sv_trim(pair.first)));
     session->state = IMAP_STATE_AUTHENTICATED;
     return bufio_send_line(bio, tprintf(SV_Fmt " OK LOGIN completed", SV_Arg(tag)));
 }
@@ -696,7 +696,9 @@ static Error handle_store(BufIO* bio, const ImapSession* session, String tag, St
     return handle_store_ex(bio, session, tag, args, false);
 }
 
-static Error handle_expunge(BufIO* bio, const ImapSession* session, String tag) {
+// uid_set is non-empty for UID EXPUNGE (RFC 4315): only expunge \Deleted msgs
+// whose UID is in the set. NULL/empty means full EXPUNGE.
+static Error expunge_impl(BufIO* bio, const ImapSession* session, String tag, String uid_set, bool is_uid_expunge) {
     String dir_path = tprintf(SV_Fmt "/" SV_Fmt "/" SV_Fmt,
                               SV_Arg(get_maildir()),
                               SV_Arg(session->user),
@@ -707,7 +709,6 @@ static Error handle_expunge(BufIO* bio, const ImapSession* session, String tag) 
         return bufio_send_line(bio, tprintf(SV_Fmt " NO mailbox not found", SV_Arg(tag)));
     }
 
-    // Collect all .eml filenames
     typedef ARRAY(String) StringArray;
     StringArray files = {0};
     struct dirent* entry;
@@ -717,12 +718,19 @@ static Error handle_expunge(BufIO* bio, const ImapSession* session, String tag) 
         array_append(&files, sv_clone(name));
     }
     closedir(dir);
+    qsort(files.data, files.length, sizeof(String), cmp_by_uid);
 
-    // Walk in order; track current sequence number (shrinks as we delete)
+    int max_uid = files.length > 0 ? parse_uid(files.data[files.length - 1]) : 0;
+    SeqRangeArray ranges = {0};
+    if (is_uid_expunge) ranges = parse_seq_set(uid_set, max_uid);
+
     int seq = 1;
     for (size_t i = 0; i < files.length; i++) {
         MessageFlags f = parse_flags(files.data[i]);
-        if (f.deleted) {
+        bool in_uid_set = is_uid_expunge
+            ? seq_in_ranges(&ranges, parse_uid(files.data[i]))
+            : true;
+        if (f.deleted && in_uid_set) {
             String full_path = tprintf(SV_Fmt "/" SV_Fmt, SV_Arg(dir_path), SV_Arg(files.data[i]));
             remove(full_path.data);
             bufio_write_line(bio, tprintf("* %d EXPUNGE", seq));
@@ -733,8 +741,19 @@ static Error handle_expunge(BufIO* bio, const ImapSession* session, String tag) 
         safe_free(files.data[i].data);
     }
     array_free(&files);
+    array_free(&ranges);
 
-    return bufio_send_line(bio, tprintf(SV_Fmt " OK EXPUNGE completed", SV_Arg(tag)));
+    return bufio_send_line(bio, tprintf(SV_Fmt " OK %s completed",
+                                        SV_Arg(tag),
+                                        is_uid_expunge ? "UID EXPUNGE" : "EXPUNGE"));
+}
+
+static Error handle_expunge(BufIO* bio, const ImapSession* session, String tag) {
+    return expunge_impl(bio, session, tag, SV(""), false);
+}
+
+static Error handle_uid_expunge(BufIO* bio, const ImapSession* session, String tag, String args) {
+    return expunge_impl(bio, session, tag, sv_trim(args), true);
 }
 
 static Error handle_append(BufIO* bio, const ImapSession* session, String tag_in, String args) {
@@ -839,7 +858,8 @@ static Error handle_append(BufIO* bio, const ImapSession* session, String tag_in
     if (has_error(err)) {
         return bufio_send_line(bio, tprintf(SV_Fmt " NO failed to write message", SV_Arg(tag)));
     }
-    return bufio_send_line(bio, tprintf(SV_Fmt " OK APPEND completed", SV_Arg(tag)));
+    return bufio_send_line(bio, tprintf(SV_Fmt " OK [APPENDUID 1 %d] APPEND completed",
+                                        SV_Arg(tag), uid));
 }
 
 static Error handle_create(BufIO* bio, const ImapSession* session, String tag, String args) {
@@ -1011,6 +1031,9 @@ static Error handle_copy_ex(BufIO* bio, const ImapSession* session, String tag, 
         : parse_seq_set(seq_set, count);
     String host = get_hostname();
 
+    StringBuilder src_set = {0};
+    StringBuilder dst_set = {0};
+
     Error err = ErrorNil;
     for (int seq = 1; seq <= count; seq++) {
         int src_uid = parse_uid(names.data[seq - 1]);
@@ -1035,6 +1058,11 @@ static Error handle_copy_ex(BufIO* bio, const ImapSession* session, String tag, 
         err = write_entire_file(dst_full.data, sb_to_sv(&body));
         sb_free(&body);
         if (has_error(err)) break;
+
+        if (src_set.length > 0) sb_push_char(&src_set, ',');
+        sb_push_sv(&src_set, tprintf("%d", src_uid));
+        if (dst_set.length > 0) sb_push_char(&dst_set, ',');
+        sb_push_sv(&dst_set, tprintf("%d", dst_uid));
     }
 
     for (size_t i = 0; i < names.length; i++) safe_free(names.data[i].data);
@@ -1042,11 +1070,22 @@ static Error handle_copy_ex(BufIO* bio, const ImapSession* session, String tag, 
     array_free(&ranges);
 
     if (has_error(err)) {
+        sb_free(&src_set); sb_free(&dst_set);
         return bufio_send_line(bio, tprintf(SV_Fmt " NO copy failed: " SV_Fmt,
                                             SV_Arg(tag), SV_Arg(err.message)));
     }
-    return bufio_send_line(bio, tprintf(SV_Fmt " OK %s completed",
-                                        SV_Arg(tag), is_uid ? "UID COPY" : "COPY"));
+
+    Error res = src_set.length > 0
+        ? bufio_send_line(bio, tprintf(SV_Fmt " OK [COPYUID 1 %.*s %.*s] %s completed",
+                                       SV_Arg(tag),
+                                       (int)src_set.length, src_set.data,
+                                       (int)dst_set.length, dst_set.data,
+                                       is_uid ? "UID COPY" : "COPY"))
+        : bufio_send_line(bio, tprintf(SV_Fmt " OK %s completed",
+                                       SV_Arg(tag), is_uid ? "UID COPY" : "COPY"));
+    sb_free(&src_set);
+    sb_free(&dst_set);
+    return res;
 }
 
 static Error handle_copy(BufIO* bio, const ImapSession* session, String tag, String args) {
@@ -1129,6 +1168,8 @@ static void* handle_client(void* p) {
                 handle_store_ex(&bio, &session, tag, uid_args, true);
             } else if (sv_equal_ignore_case(uid_cmd, SV("COPY"))) {
                 handle_copy_ex(&bio, &session, tag, uid_args, true);
+            } else if (sv_equal_ignore_case(uid_cmd, SV("EXPUNGE"))) {
+                handle_uid_expunge(&bio, &session, tag, uid_args);
             } else {
                 bufio_send_line(&bio, tprintf(SV_Fmt " BAD UID %s not supported", SV_Arg(tag), uid_cmd.data));
             }

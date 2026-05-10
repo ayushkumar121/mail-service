@@ -3,9 +3,11 @@
 set -e
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 
-# IMAP test user — 2 pre-seeded messages
-MAILDIR="$SCRIPT_DIR/../maildir/testuser/INBOX"
-rm -rf "$MAILDIR"
+# IMAP test user — wipe entire user dir so folders created by previous runs
+# (Archive, Drafts, Trash, Auto, Saved) don't leak into the next run.
+USER_DIR="$SCRIPT_DIR/../maildir/testuser"
+MAILDIR="$USER_DIR/INBOX"
+rm -rf "$USER_DIR"
 mkdir -p "$MAILDIR"
 printf "From: sender@example.com\r\nTo: testuser\r\nSubject: Test Message 1\r\n\r\nThis is body 1.\r\n" \
     > "$MAILDIR/1700000001.aaa.host;U=1.eml"
