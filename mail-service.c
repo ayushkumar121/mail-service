@@ -16,7 +16,8 @@ int main(int argc, char** argv) {
   // Don't crash when a peer closes the connection mid-write.
   signal(SIGPIPE, SIG_IGN);
 
-  try(config_load("config.json"));
+  const char* config_path = argc > 1 ? argv[1] : "config.json";
+  try(config_load(config_path));
 
   INFO("Setting up maildir: "SV_Fmt, SV_Arg(get_maildir()));
 
