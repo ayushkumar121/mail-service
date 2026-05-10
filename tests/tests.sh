@@ -105,12 +105,12 @@ run_test "9b STORE +FLAGS Seen: flag present" "Seen"            "$T"
 
 # Verify Maildir rename happened on disk
 MAILDIR="$(dirname "$0")/../maildir/testuser/INBOX"
-SEEN_FILE=$(ls "$MAILDIR" | grep ":2,.*S" 2>/dev/null | head -1)
+SEEN_FILE=$(ls "$MAILDIR" | grep "F=[^,.]*S" 2>/dev/null | head -1)
 if [ -n "$SEEN_FILE" ]; then
-    echo "PASS  9c STORE: Maildir filename has :2,S suffix ($SEEN_FILE)"
+    echo "PASS  9c STORE: Maildir filename has F=...S... suffix ($SEEN_FILE)"
     PASS_COUNT=$((PASS_COUNT + 1))
 else
-    echo "FAIL  9c STORE: no :2,S suffix found in $MAILDIR"
+    echo "FAIL  9c STORE: no F=...S... suffix found in $MAILDIR"
     ls "$MAILDIR"
     FAIL_COUNT=$((FAIL_COUNT + 1))
 fi
@@ -125,7 +125,7 @@ run_test "11  EXPUNGE response"               "EXPUNGE"         "$T"
 run_test "11b EXPUNGE OK"                     "OK EXPUNGE"      "$T"
 
 # Verify file deleted from disk
-DELETED_FILE=$(ls "$MAILDIR" | grep ":2,.*T" 2>/dev/null | head -1)
+DELETED_FILE=$(ls "$MAILDIR" | grep "F=[^,.]*T" 2>/dev/null | head -1)
 if [ -z "$DELETED_FILE" ]; then
     echo "PASS  11c EXPUNGE: deleted file removed from Maildir"
     PASS_COUNT=$((PASS_COUNT + 1))
@@ -192,12 +192,12 @@ nc_send $"a1 LOGIN $USER $PASS\r\na2 CREATE Drafts\r\na3 LOGOUT\r\n" >/dev/null
 T=$(printf '%b' "a1 LOGIN $USER $PASS\r\na2 APPEND Drafts (\\\\Seen) {$APPEND_LEN}\r\n${APPEND_BODY}\r\na3 LOGOUT\r\n" | nc "$HOST" "$PORT" 2>/dev/null)
 run_test "A1  APPEND: + continuation"          "+ Ready"         "$T"
 run_test "A1b APPEND: OK APPEND"               "OK APPEND"       "$T"
-APPEND_FILE=$(ls "$(dirname "$0")/../maildir/$USER/Drafts" 2>/dev/null | grep ":2,.*S" | head -1)
+APPEND_FILE=$(ls "$(dirname "$0")/../maildir/$USER/Drafts" 2>/dev/null | grep "F=[^,.]*S" | head -1)
 if [ -n "$APPEND_FILE" ]; then
-    echo "PASS  A1c APPEND: file written with :2,S ($APPEND_FILE)"
+    echo "PASS  A1c APPEND: file written with F=...S... ($APPEND_FILE)"
     PASS_COUNT=$((PASS_COUNT + 1))
 else
-    echo "FAIL  A1c APPEND: no file with :2,S found in Drafts"
+    echo "FAIL  A1c APPEND: no file with F=...S... found in Drafts"
     ls "$(dirname "$0")/../maildir/$USER/Drafts" 2>/dev/null
     FAIL_COUNT=$((FAIL_COUNT + 1))
 fi

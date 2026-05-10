@@ -1,4 +1,5 @@
 #include "smtp.h"
+#include "maildir.h"
 
 #include <errno.h>
 #include <resolv.h>
@@ -267,12 +268,15 @@ static void* handle_client(void* p) {
             body.length -= strlen(CRLF "." CRLF);
 
             String sender_host = ehlo_host.length > 0 ? ehlo_host : SV("localhost");
-            String filename = tprintf(SV_Fmt "/" SV_Fmt "/INBOX/%ld.%s." SV_Fmt ".eml",
-                SV_Arg(get_maildir()),
-                SV_Arg(rcpt_to),
+            String inbox = tprintf(SV_Fmt "/" SV_Fmt "/INBOX",
+                                   SV_Arg(get_maildir()), SV_Arg(rcpt_to));
+            int uid = next_uid(inbox.data);
+            String filename = tprintf(SV_Fmt "/%ld.%s." SV_Fmt ";U=%d.eml",
+                SV_Arg(inbox),
                 (long)time(NULL),
                 sv_to_tmp_c(random_id(RANDOM_ID_LEN)),
-                SV_Arg(sender_host));
+                SV_Arg(sender_host),
+                uid);
             write_entire_file(filename.data, body);
 
             bufio_send_line(&bio, SV("250 OK queued"));

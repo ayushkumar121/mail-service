@@ -10,6 +10,7 @@
 #include <sys/stat.h>
 
 #include "config.h"
+#include "maildir.h"
 
 #define IMAP_SOCKET_BACKLOG 1024
 #define IMAP_DEFAULT_PORT 143
@@ -29,95 +30,6 @@ typedef struct {
     String selected_mailbox;
 } ImapSession;
 
-// ---------------------------------------------------------------------------
-// Maildir flag helpers
-// Maildir encodes flags as a filename suffix: "basename.eml:2,DFrst"
-// Letters: D=Draft F=Flagged R=Replied S=Seen T=Trashed(\Deleted)
-// ---------------------------------------------------------------------------
-
-typedef struct {
-    bool seen;
-    bool deleted;
-    bool flagged;
-    bool replied;
-    bool draft;
-} MessageFlags;
-
-static MessageFlags parse_flags(String filename) {
-    MessageFlags f = {0};
-    ssize_t pos = sv_find(filename, ":2,");
-    if (pos < 0) return f;
-    for (size_t i = (size_t)pos + 3; i < filename.length; i++) {
-        switch (filename.data[i]) {
-            case 'S': f.seen    = true; break;
-            case 'T': f.deleted = true; break;
-            case 'F': f.flagged = true; break;
-            case 'R': f.replied = true; break;
-            case 'D': f.draft   = true; break;
-            default: break;
-        }
-    }
-    return f;
-}
-
-// Returns the base name without ":2,..." suffix (tprintf-allocated)
-static String flags_basename(String filename) {
-    ssize_t pos = sv_find(filename, ":2,");
-    if (pos < 0) return filename;
-    return tprintf("%.*s", (int)pos, filename.data);
-}
-
-// Build "<base>:2,<chars>" in tprintf memory, e.g. "1.eml:2,ST"
-static String maildir_filename(String base, MessageFlags f) {
-    char chars[8] = {0};
-    int n = 0;
-    if (f.draft)   chars[n++] = 'D';
-    if (f.flagged) chars[n++] = 'F';
-    if (f.replied) chars[n++] = 'R';
-    if (f.seen)    chars[n++] = 'S';
-    if (f.deleted) chars[n++] = 'T';
-    return tprintf(SV_Fmt ":2,%s", SV_Arg(base), chars);
-}
-
-// Produces a new filename with flag_char set (keeps flags sorted, tprintf-allocated)
-static String set_flag(String filename, char flag_char) {
-    MessageFlags f = parse_flags(filename);
-    switch (flag_char) {
-        case 'D': f.draft   = true; break;
-        case 'F': f.flagged = true; break;
-        case 'R': f.replied = true; break;
-        case 'S': f.seen    = true; break;
-        case 'T': f.deleted = true; break;
-        default: break;
-    }
-    return maildir_filename(flags_basename(filename), f);
-}
-
-// Produces IMAP FLAGS string e.g. "(\Seen \Deleted)" (tprintf-allocated)
-static String flags_to_imap(MessageFlags f) {
-    StringBuilder sb = {0};
-    sb_push_char(&sb, '(');
-    bool first = true;
-    if (f.seen)    { if (!first) sb_push_char(&sb, ' '); sb_push_str(&sb, "\\Seen");    first = false; }
-    if (f.deleted) { if (!first) sb_push_char(&sb, ' '); sb_push_str(&sb, "\\Deleted"); first = false; }
-    if (f.flagged) { if (!first) sb_push_char(&sb, ' '); sb_push_str(&sb, "\\Flagged"); first = false; }
-    if (f.replied) { if (!first) sb_push_char(&sb, ' '); sb_push_str(&sb, "\\Answered"); first = false; }
-    if (f.draft)   { if (!first) sb_push_char(&sb, ' '); sb_push_str(&sb, "\\Draft");   first = false; }
-    sb_push_char(&sb, ')');
-    String result = tprintf("%.*s", (int)sb.length, sb.data);
-    sb_free(&sb);
-    return result;
-}
-
-// Map IMAP flag name (e.g. "\\Seen") to Maildir letter; returns 0 if unknown
-static char imap_flag_to_maildir(String imap_flag) {
-    if (sv_equal_ignore_case(imap_flag, SV("\\Seen")))    return 'S';
-    if (sv_equal_ignore_case(imap_flag, SV("\\Deleted"))) return 'T';
-    if (sv_equal_ignore_case(imap_flag, SV("\\Flagged"))) return 'F';
-    if (sv_equal_ignore_case(imap_flag, SV("\\Answered"))) return 'R';
-    if (sv_equal_ignore_case(imap_flag, SV("\\Draft")))   return 'D';
-    return 0;
-}
 
 static Error handle_capability(BufIO* bio, String tag) {
     bufio_write_line(bio, SV("* CAPABILITY " IMAP_CAPABILITY));
@@ -442,14 +354,21 @@ static Error handle_fetch_ex(BufIO* bio, const ImapSession* session, String tag,
         array_append(&names, sv_clone(name));
     }
     closedir(dir);
+    qsort(names.data, names.length, sizeof(String), cmp_by_uid);
 
     int count = (int)names.length;
-    SeqRangeArray ranges = parse_seq_set(seq_set, count);
+    int max_uid = count > 0 ? parse_uid(names.data[count - 1]) : 0;
+
+    SeqRangeArray ranges = is_uid
+        ? parse_seq_set(seq_set, max_uid)
+        : parse_seq_set(seq_set, count);
     FetchItems fi = parse_fetch_items(items_str, is_uid);
 
     Error err = ErrorNil;
     for (int seq = 1; seq <= count; seq++) {
-        if (!seq_in_ranges(&ranges, seq)) continue;
+        int msg_uid = parse_uid(names.data[seq - 1]);
+        bool match = is_uid ? seq_in_ranges(&ranges, msg_uid) : seq_in_ranges(&ranges, seq);
+        if (!match) continue;
 
         String name = names.data[seq - 1];
         MessageFlags flags = parse_flags(name);
@@ -471,7 +390,7 @@ static Error handle_fetch_ex(BufIO* bio, const ImapSession* session, String tag,
         bool first = true;
         if (fi.uid) {
             if (!first) sb_push_char(&line, ' ');
-            sb_push_sv(&line, tprintf("UID %d", seq));
+            sb_push_sv(&line, tprintf("UID %d", msg_uid));
             first = false;
         }
         if (fi.flags) {
@@ -678,19 +597,31 @@ static Error handle_store_ex(BufIO* bio, const ImapSession* session, String tag,
         return bufio_send_line(bio, tprintf(SV_Fmt " NO mailbox not found", SV_Arg(tag)));
     }
 
-    int count = 0;
+    typedef ARRAY(String) StringArray;
+    StringArray names = {0};
     struct dirent* entry;
-    String old_name = StringNil;
     while ((entry = readdir(dir)) != NULL) {
         String name = SV2(entry->d_name, strlen(entry->d_name));
         if (sv_find(name, ".eml") == -1) continue;
-        count++;
-        if (count == seq) {
-            old_name = sv_clone(name);
+        array_append(&names, sv_clone(name));
+    }
+    closedir(dir);
+    qsort(names.data, names.length, sizeof(String), cmp_by_uid);
+
+    // For UID STORE, `seq` is actually a UID; locate the matching message.
+    // For plain STORE, `seq` is a sequence number into the sorted list.
+    String old_name = StringNil;
+    int seq_pos = 0;
+    for (size_t i = 0; i < names.length; i++) {
+        bool match = is_uid ? (parse_uid(names.data[i]) == seq) : ((int)i + 1 == seq);
+        if (match) {
+            old_name = sv_clone(names.data[i]);
+            seq_pos = (int)i + 1;
             break;
         }
     }
-    closedir(dir);
+    for (size_t i = 0; i < names.length; i++) safe_free(names.data[i].data);
+    array_free(&names);
 
     if (old_name.length == 0) {
         return bufio_send_line(bio, tprintf(SV_Fmt " NO message not found", SV_Arg(tag)));
@@ -715,7 +646,7 @@ static Error handle_store_ex(BufIO* bio, const ImapSession* session, String tag,
         flags_str = fp.second;
     }
 
-    String new_name = maildir_filename(flags_basename(old_name), target);
+    String new_name = maildir_filename(flags_basename(old_name), parse_uid(old_name), target);
 
     String old_path = tprintf(SV_Fmt "/" SV_Fmt, SV_Arg(dir_path), SV_Arg(old_name));
     String new_path = tprintf(SV_Fmt "/" SV_Fmt, SV_Arg(dir_path), SV_Arg(new_name));
@@ -729,9 +660,10 @@ static Error handle_store_ex(BufIO* bio, const ImapSession* session, String tag,
     String imap_flags = flags_to_imap(f);
 
     if (is_uid) {
-        bufio_write_line(bio, tprintf("* %d FETCH (UID %d FLAGS %s)", seq, seq, imap_flags.data));
+        bufio_write_line(bio, tprintf("* %d FETCH (UID %d FLAGS %s)",
+                                      seq_pos, parse_uid(new_name), imap_flags.data));
     } else {
-        bufio_write_line(bio, tprintf("* %d FETCH (FLAGS %s)", seq, imap_flags.data));
+        bufio_write_line(bio, tprintf("* %d FETCH (FLAGS %s)", seq_pos, imap_flags.data));
     }
     return bufio_send_line(bio, tprintf(SV_Fmt " OK STORE completed", SV_Arg(tag)));
 }
@@ -872,10 +804,11 @@ static Error handle_append(BufIO* bio, const ImapSession* session, String tag_in
     if (has_error(err)) { safe_free(body.data); return err; }
 
     String host = get_hostname();
-    String base = tprintf(SV_Fmt "/%ld." SV_Fmt "." SV_Fmt ".eml",
+    int uid = next_uid(dir_path.data);
+    String base = tprintf(SV_Fmt "/%ld." SV_Fmt "." SV_Fmt,
                           SV_Arg(dir_path), (long)time(NULL),
                           SV_Arg(random_id(RANDOM_ID_LEN)), SV_Arg(host));
-    String filename = maildir_filename(base, flags);
+    String filename = maildir_filename(base, uid, flags);
 
     err = write_entire_file(filename.data, body);
     safe_free(body.data);
@@ -1045,14 +978,20 @@ static Error handle_copy_ex(BufIO* bio, const ImapSession* session, String tag, 
         array_append(&names, sv_clone(name));
     }
     closedir(dir);
+    qsort(names.data, names.length, sizeof(String), cmp_by_uid);
 
     int count = (int)names.length;
-    SeqRangeArray ranges = parse_seq_set(seq_set, count);
+    int max_uid = count > 0 ? parse_uid(names.data[count - 1]) : 0;
+    SeqRangeArray ranges = is_uid
+        ? parse_seq_set(seq_set, max_uid)
+        : parse_seq_set(seq_set, count);
     String host = get_hostname();
 
     Error err = ErrorNil;
     for (int seq = 1; seq <= count; seq++) {
-        if (!seq_in_ranges(&ranges, seq)) continue;
+        int src_uid = parse_uid(names.data[seq - 1]);
+        bool match = is_uid ? seq_in_ranges(&ranges, src_uid) : seq_in_ranges(&ranges, seq);
+        if (!match) continue;
 
         String src_name = names.data[seq - 1];
         String src_full = tprintf(SV_Fmt "/" SV_Fmt, SV_Arg(src_path), SV_Arg(src_name));
@@ -1061,19 +1000,13 @@ static Error handle_copy_ex(BufIO* bio, const ImapSession* session, String tag, 
         err = read_entire_file(src_full.data, &body);
         if (has_error(err)) break;
 
-        // Preserve maildir flag suffix (":2,FRS...") from original
-        ssize_t flag_pos = sv_find(src_name, ":2,");
-        String flag_suffix = (flag_pos >= 0)
-            ? SV2(src_name.data + flag_pos, src_name.length - (size_t)flag_pos)
-            : SV("");
-
-        String dst_full = flag_suffix.length > 0
-            ? tprintf(SV_Fmt "/%ld." SV_Fmt "." SV_Fmt ".eml" SV_Fmt,
-                      SV_Arg(dst_path), (long)time(NULL),
-                      SV_Arg(random_id(RANDOM_ID_LEN)), SV_Arg(host), SV_Arg(flag_suffix))
-            : tprintf(SV_Fmt "/%ld." SV_Fmt "." SV_Fmt ".eml",
-                      SV_Arg(dst_path), (long)time(NULL),
-                      SV_Arg(random_id(RANDOM_ID_LEN)), SV_Arg(host));
+        // Preserve flags from source; allocate fresh UID in destination.
+        MessageFlags f = parse_flags(src_name);
+        int dst_uid = next_uid(dst_path.data);
+        String base = tprintf(SV_Fmt "/%ld." SV_Fmt "." SV_Fmt,
+                              SV_Arg(dst_path), (long)time(NULL),
+                              SV_Arg(random_id(RANDOM_ID_LEN)), SV_Arg(host));
+        String dst_full = maildir_filename(base, dst_uid, f);
 
         err = write_entire_file(dst_full.data, sb_to_sv(&body));
         sb_free(&body);

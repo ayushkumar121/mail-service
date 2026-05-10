@@ -3,7 +3,7 @@ CC=cc
 CFLAGS=-Wall -g
 LIBS= -lresolv
 
-OBJS=http.o basic.o config.o smtp.o imap.o
+OBJS=http.o basic.o config.o maildir.o smtp.o imap.o
 
 $(MAIN): $(MAIN).c $(OBJS)
 	$(CC) -o $@ $^ $(CFLAGS) $(LIBS)
