@@ -514,6 +514,7 @@ static Error handle_close(BufIO* bio, ImapSession* session, String tag) {
                 if (sv_find(name, ".eml") == -1) continue;
                 if (parse_flags(name).deleted) {
                     String full = tprintf(SV_Fmt "/" SV_Fmt, SV_Arg(dir_path), SV_Arg(name));
+                    INFO("CLOSE expunging " SV_Fmt, SV_Arg(full));
                     remove(full.data);
                 }
             }
@@ -732,6 +733,9 @@ static Error expunge_impl(BufIO* bio, const ImapSession* session, String tag, St
             : true;
         if (f.deleted && in_uid_set) {
             String full_path = tprintf(SV_Fmt "/" SV_Fmt, SV_Arg(dir_path), SV_Arg(files.data[i]));
+            INFO("%s expunging seq=%d uid=%d " SV_Fmt,
+                 is_uid_expunge ? "UID EXPUNGE" : "EXPUNGE",
+                 seq, parse_uid(files.data[i]), SV_Arg(full_path));
             remove(full_path.data);
             bufio_write_line(bio, tprintf("* %d EXPUNGE", seq));
             // do not increment seq — sequence numbers shift down after each expunge
