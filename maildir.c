@@ -104,27 +104,3 @@ int cmp_by_uid(const void* a, const void* b) {
     int ub = parse_uid(*(const String*)b);
     return (ua > ub) - (ua < ub);
 }
-
-String flags_to_imap(MessageFlags f) {
-    StringBuilder sb = {0};
-    sb_push_char(&sb, '(');
-    bool first = true;
-    if (f.seen)    { if (!first) sb_push_char(&sb, ' '); sb_push_str(&sb, "\\Seen");    first = false; }
-    if (f.deleted) { if (!first) sb_push_char(&sb, ' '); sb_push_str(&sb, "\\Deleted"); first = false; }
-    if (f.flagged) { if (!first) sb_push_char(&sb, ' '); sb_push_str(&sb, "\\Flagged"); first = false; }
-    if (f.replied) { if (!first) sb_push_char(&sb, ' '); sb_push_str(&sb, "\\Answered"); first = false; }
-    if (f.draft)   { if (!first) sb_push_char(&sb, ' '); sb_push_str(&sb, "\\Draft");   first = false; }
-    sb_push_char(&sb, ')');
-    String result = tprintf("%.*s", (int)sb.length, sb.data);
-    sb_free(&sb);
-    return result;
-}
-
-char imap_flag_to_maildir(String imap_flag) {
-    if (sv_equal_ignore_case(imap_flag, SV("\\Seen")))     return 'S';
-    if (sv_equal_ignore_case(imap_flag, SV("\\Deleted")))  return 'T';
-    if (sv_equal_ignore_case(imap_flag, SV("\\Flagged")))  return 'F';
-    if (sv_equal_ignore_case(imap_flag, SV("\\Answered"))) return 'R';
-    if (sv_equal_ignore_case(imap_flag, SV("\\Draft")))    return 'D';
-    return 0;
-}

@@ -35,8 +35,4 @@ int next_uid(const char* dir_path);
 // qsort comparator: ascending UID order
 int cmp_by_uid(const void* a, const void* b);
 
-// IMAP flag <-> maildir letter
-String flags_to_imap(MessageFlags f);            // "(\Seen \Deleted)"
-char   imap_flag_to_maildir(String imap_flag);   // "\\Seen" -> 'S'
-
 #endif
