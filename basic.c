@@ -1178,10 +1178,12 @@ Error bufio_read_until(BufIO* bio, const char* terminator) {
 
         const ssize_t n = read(bio->fd, buf, sizeof(buf));
         if (n < 0) {
-            if (errno == EAGAIN || errno == EWOULDBLOCK) break;
+            if (errno == EAGAIN || errno == EWOULDBLOCK || errno == EINTR) continue;
             return errorf("bufio read failed: %s", strerror(errno));
         }
-        if (n == 0) break; // EOF
+        if (n == 0) {
+            return errorf("bufio connection closed before terminator");
+        }
         sb_push_sv(&bio->read_buf, SV2(buf, n));
     }
 
@@ -1190,15 +1192,24 @@ Error bufio_read_until(BufIO* bio, const char* terminator) {
 
 Error bufio_read_n(BufIO* bio, size_t n) {
     bio->read_buf.length = 0;
-    char buf[512];
 
+    // Drain pipelined bytes from a previous bufio_read_until first.
+    if (bio->overflow.length > 0) {
+        size_t take = bio->overflow.length < n ? bio->overflow.length : n;
+        sb_push_sv(&bio->read_buf, SV2(bio->overflow.data, take));
+        size_t leftover = bio->overflow.length - take;
+        if (leftover > 0) memmove(bio->overflow.data, bio->overflow.data + take, leftover);
+        bio->overflow.length = leftover;
+    }
+
+    char buf[512];
     while (bio->read_buf.length < n) {
         size_t to_read = n - bio->read_buf.length;
         if (to_read > sizeof(buf)) to_read = sizeof(buf);
 
         const ssize_t read_n = read(bio->fd, buf, to_read);
         if (read_n < 0) {
-            if (errno == EAGAIN || errno == EWOULDBLOCK) continue;
+            if (errno == EAGAIN || errno == EWOULDBLOCK || errno == EINTR) continue;
             return errorf("bufio read failed: %s", strerror(errno));
         }
         if (read_n == 0) return errorf("bufio connection closed");
@@ -1229,14 +1240,14 @@ Error bufio_read_all(BufIO* bio) {
     return ErrorNil;
 }
 
-Error bufio_write(BufIO* bio, String data) {
+Error bufio_send(BufIO* bio, String data) {
     bio->write_buf.length = 0;
     sb_push_sv(&bio->write_buf, data);
 
     return bufio_flush(bio);
 }
 
-Error bufio_writeln(BufIO* bio, String data) {
+Error bufio_send_line(BufIO* bio, String data) {
     bio->write_buf.length = 0;
     sb_push_sv(&bio->write_buf, data);
     sb_push_sv(&bio->write_buf, SV("\r\n"));

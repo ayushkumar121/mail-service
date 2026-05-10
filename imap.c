@@ -116,13 +116,13 @@ static char imap_flag_to_maildir(String imap_flag) {
 }
 
 static Error handle_capability(BufIO* bio, String tag) {
-    Error err = bufio_writeln(bio, SV("* CAPABILITY " IMAP_CAPABILITY));
+    Error err = bufio_send_line(bio, SV("* CAPABILITY " IMAP_CAPABILITY));
     if (has_error(err)) return err;
-    return bufio_writeln(bio, tprintf(SV_Fmt " OK CAPABILITY completed", SV_Arg(tag)));
+    return bufio_send_line(bio, tprintf(SV_Fmt " OK CAPABILITY completed", SV_Arg(tag)));
 }
 
 static Error handle_noop(BufIO* bio, String tag) {
-    return bufio_writeln(bio, tprintf(SV_Fmt " OK NOOP completed", SV_Arg(tag)));
+    return bufio_send_line(bio, tprintf(SV_Fmt " OK NOOP completed", SV_Arg(tag)));
 }
 
 Error handle_login(BufIO* bio, ImapSession* session, String tag, String args) {
@@ -130,7 +130,7 @@ Error handle_login(BufIO* bio, ImapSession* session, String tag, String args) {
     StringPair pair = sv_split_delim(args, ' ');
     session->user = sv_clone(sv_trim(pair.first));
     session->state = IMAP_STATE_AUTHENTICATED;
-    return bufio_writeln(bio, tprintf(SV_Fmt " OK LOGIN completed", SV_Arg(tag)));
+    return bufio_send_line(bio, tprintf(SV_Fmt " OK LOGIN completed", SV_Arg(tag)));
 }
 
 // Strip surrounding double-quotes from a string token if present
@@ -159,9 +159,9 @@ static Error handle_list_like(BufIO* bio, const ImapSession* session, String tag
 
     // Hierarchy-delimiter probe: LIST "" ""
     if (pattern.length == 0) {
-        Error err = bufio_writeln(bio, tprintf("* %s (\\Noselect) \"/\" \"\"", cmd_name));
+        Error err = bufio_send_line(bio, tprintf("* %s (\\Noselect) \"/\" \"\"", cmd_name));
         if (has_error(err)) return err;
-        return bufio_writeln(bio, tprintf(SV_Fmt " OK %s completed", SV_Arg(tag), cmd_name));
+        return bufio_send_line(bio, tprintf(SV_Fmt " OK %s completed", SV_Arg(tag), cmd_name));
     }
 
     // RFC 3501: reference and pattern are concatenated directly (no separator)
@@ -178,7 +178,7 @@ static Error handle_list_like(BufIO* bio, const ImapSession* session, String tag
     DIR* dir = opendir(user_dir.data);
     if (dir == NULL) {
         // User maildir doesn't exist yet — return empty list
-        return bufio_writeln(bio, tprintf(SV_Fmt " OK %s completed", SV_Arg(tag), cmd_name));
+        return bufio_send_line(bio, tprintf(SV_Fmt " OK %s completed", SV_Arg(tag), cmd_name));
     }
 
     struct dirent* entry;
@@ -189,12 +189,12 @@ static Error handle_list_like(BufIO* bio, const ImapSession* session, String tag
         String name = SV2(entry->d_name, strlen(entry->d_name));
         if (fnmatch(pat_cstr, sv_to_tmp_c(name), FNM_CASEFOLD) != 0) continue;
 
-        Error err = bufio_writeln(bio,
+        Error err = bufio_send_line(bio,
             tprintf("* %s () \"/\" \"" SV_Fmt "\"", cmd_name, SV_Arg(name)));
         if (has_error(err)) { closedir(dir); return err; }
     }
     closedir(dir);
-    return bufio_writeln(bio, tprintf(SV_Fmt " OK %s completed", SV_Arg(tag), cmd_name));
+    return bufio_send_line(bio, tprintf(SV_Fmt " OK %s completed", SV_Arg(tag), cmd_name));
 }
 
 static Error handle_list(BufIO* bio, const ImapSession* session, String tag, String args) {
@@ -229,27 +229,27 @@ static Error handle_select(BufIO* bio, ImapSession* session, String tag, String 
         closedir(dir);
     }
 
-    Error err = bufio_writeln(bio, SV("* FLAGS (\\Seen \\Answered \\Flagged \\Deleted \\Draft)"));
+    Error err = bufio_send_line(bio, SV("* FLAGS (\\Seen \\Answered \\Flagged \\Deleted \\Draft)"));
     if (has_error(err)) return err;
-    err = bufio_writeln(bio, tprintf("* %d EXISTS", count));
+    err = bufio_send_line(bio, tprintf("* %d EXISTS", count));
     if (has_error(err)) return err;
-    err = bufio_writeln(bio, tprintf("* %d RECENT", unseen));
+    err = bufio_send_line(bio, tprintf("* %d RECENT", unseen));
     if (has_error(err)) return err;
-    err = bufio_writeln(bio, SV("* OK [UIDVALIDITY 1] UIDs valid"));
+    err = bufio_send_line(bio, SV("* OK [UIDVALIDITY 1] UIDs valid"));
     if (has_error(err)) return err;
-    err = bufio_writeln(bio, tprintf("* OK [UIDNEXT %d] Predicted next UID", count + 1));
+    err = bufio_send_line(bio, tprintf("* OK [UIDNEXT %d] Predicted next UID", count + 1));
     if (has_error(err)) return err;
-    err = bufio_writeln(bio, SV("* OK [PERMANENTFLAGS (\\Seen \\Answered \\Flagged \\Deleted \\Draft)] Limited"));
+    err = bufio_send_line(bio, SV("* OK [PERMANENTFLAGS (\\Seen \\Answered \\Flagged \\Deleted \\Draft)] Limited"));
     if (has_error(err)) return err;
-    return bufio_writeln(bio, tprintf(SV_Fmt " OK [READ-WRITE] SELECT completed", SV_Arg(tag)));
+    return bufio_send_line(bio, tprintf(SV_Fmt " OK [READ-WRITE] SELECT completed", SV_Arg(tag)));
 }
 
 static void handle_subscribe(BufIO* bio, ImapSession* session, String tag, String args) {
-    bufio_writeln(bio, tprintf(SV_Fmt " OK SUBSCRIBE completed", SV_Arg(tag)));
+    bufio_send_line(bio, tprintf(SV_Fmt " OK SUBSCRIBE completed", SV_Arg(tag)));
 }
 
 static void handle_unsubscribe(BufIO* bio, ImapSession* session, String tag, String args) {
-    bufio_writeln(bio, tprintf(SV_Fmt " OK UNSUBSCRIBE completed", SV_Arg(tag)));
+    bufio_send_line(bio, tprintf(SV_Fmt " OK UNSUBSCRIBE completed", SV_Arg(tag)));
 }
 typedef struct {
     bool flags;
@@ -435,7 +435,7 @@ static Error handle_fetch_ex(BufIO* bio, const ImapSession* session, String tag,
 
     DIR* dir = opendir(path.data);
     if (dir == NULL) {
-        return bufio_writeln(bio, tprintf(SV_Fmt " NO mailbox not found", SV_Arg(tag)));
+        return bufio_send_line(bio, tprintf(SV_Fmt " NO mailbox not found", SV_Arg(tag)));
     }
 
     typedef ARRAY(String) StringArray;
@@ -498,7 +498,7 @@ static Error handle_fetch_ex(BufIO* bio, const ImapSession* session, String tag,
             err = read_entire_file(full_path.data, &body_sb);
             if (has_error(err)) {
                 sb_free(&line); sb_free(&body_sb);
-                err = bufio_writeln(bio, tprintf(SV_Fmt " NO failed to read message", SV_Arg(tag)));
+                err = bufio_send_line(bio, tprintf(SV_Fmt " NO failed to read message", SV_Arg(tag)));
                 goto cleanup;
             }
             has_body = true;
@@ -533,25 +533,25 @@ static Error handle_fetch_ex(BufIO* bio, const ImapSession* session, String tag,
             sb_push_sv(&line, tprintf("BODY[" SV_Fmt "] {%zu}",
                                       SV_Arg(sec), body_data.length));
             sb_push_sv(&line, SV("\r\n"));
-            err = bufio_write(bio, sb_to_sv(&line));
+            err = bufio_send(bio, sb_to_sv(&line));
             sb_free(&line);
             if (has_error(err)) { sb_free(&body_sb); goto cleanup; }
-            err = bufio_write(bio, body_data);
+            err = bufio_send(bio, body_data);
             sb_free(&body_sb);
             if (has_error(err)) goto cleanup;
-            err = bufio_writeln(bio, SV(")"));
+            err = bufio_send_line(bio, SV(")"));
             if (has_error(err)) goto cleanup;
             continue;
         }
 
         if (has_body) sb_free(&body_sb);
         sb_push_char(&line, ')');
-        err = bufio_writeln(bio, sb_to_sv(&line));
+        err = bufio_send_line(bio, sb_to_sv(&line));
         sb_free(&line);
         if (has_error(err)) goto cleanup;
     }
 
-    err = bufio_writeln(bio, tprintf(SV_Fmt " OK %s completed",
+    err = bufio_send_line(bio, tprintf(SV_Fmt " OK %s completed",
                                      SV_Arg(tag), is_uid ? "UID FETCH" : "FETCH"));
 cleanup:
     for (size_t i = 0; i < names.length; i++) safe_free(names.data[i].data);
@@ -589,7 +589,7 @@ static Error handle_close(BufIO* bio, ImapSession* session, String tag) {
     safe_free(session->selected_mailbox.data);
     session->selected_mailbox = StringNil;
     session->state = IMAP_STATE_AUTHENTICATED;
-    return bufio_writeln(bio, tprintf(SV_Fmt " OK CLOSE completed", SV_Arg(tag)));
+    return bufio_send_line(bio, tprintf(SV_Fmt " OK CLOSE completed", SV_Arg(tag)));
 }
 
 static Error handle_status(BufIO* bio, const ImapSession* session, String tag, String args) {
@@ -602,7 +602,7 @@ static Error handle_status(BufIO* bio, const ImapSession* session, String tag, S
         for (size_t i = 1; i < args.length; i++) {
             if (args.data[i] == '"') { eq = (ssize_t)i; break; }
         }
-        if (eq < 0) return bufio_writeln(bio, tprintf(SV_Fmt " BAD unterminated mailbox", SV_Arg(tag)));
+        if (eq < 0) return bufio_send_line(bio, tprintf(SV_Fmt " BAD unterminated mailbox", SV_Arg(tag)));
         mailbox = SV2(args.data + 1, (size_t)eq - 1);
         items = sv_trim(SV2(args.data + eq + 1, args.length - (size_t)eq - 1));
     } else {
@@ -654,10 +654,10 @@ static Error handle_status(BufIO* bio, const ImapSession* session, String tag, S
     }
     sb_push_char(&out, ')');
 
-    Error err = bufio_writeln(bio, sb_to_sv(&out));
+    Error err = bufio_send_line(bio, sb_to_sv(&out));
     sb_free(&out);
     if (has_error(err)) return err;
-    return bufio_writeln(bio, tprintf(SV_Fmt " OK STATUS completed", SV_Arg(tag)));
+    return bufio_send_line(bio, tprintf(SV_Fmt " OK STATUS completed", SV_Arg(tag)));
 }
 
 static Error handle_store(BufIO* bio, const ImapSession* session, String tag, String args) {
@@ -679,7 +679,7 @@ static Error handle_store(BufIO* bio, const ImapSession* session, String tag, St
 
     char maildir_flag = imap_flag_to_maildir(flags_str);
     if (maildir_flag == 0) {
-        return bufio_writeln(bio, tprintf(SV_Fmt " BAD unknown flag", SV_Arg(tag)));
+        return bufio_send_line(bio, tprintf(SV_Fmt " BAD unknown flag", SV_Arg(tag)));
     }
 
     String dir_path = tprintf(SV_Fmt "/" SV_Fmt "/" SV_Fmt,
@@ -689,7 +689,7 @@ static Error handle_store(BufIO* bio, const ImapSession* session, String tag, St
 
     DIR* dir = opendir(dir_path.data);
     if (dir == NULL) {
-        return bufio_writeln(bio, tprintf(SV_Fmt " NO mailbox not found", SV_Arg(tag)));
+        return bufio_send_line(bio, tprintf(SV_Fmt " NO mailbox not found", SV_Arg(tag)));
     }
 
     int count = 0;
@@ -707,7 +707,7 @@ static Error handle_store(BufIO* bio, const ImapSession* session, String tag, St
     closedir(dir);
 
     if (old_name.length == 0) {
-        return bufio_writeln(bio, tprintf(SV_Fmt " NO message not found", SV_Arg(tag)));
+        return bufio_send_line(bio, tprintf(SV_Fmt " NO message not found", SV_Arg(tag)));
     }
 
     String new_name = set_flag(old_name, maildir_flag);
@@ -722,9 +722,9 @@ static Error handle_store(BufIO* bio, const ImapSession* session, String tag, St
     MessageFlags f = parse_flags(new_name);
     String imap_flags = flags_to_imap(f);
 
-    Error err = bufio_writeln(bio, tprintf("* %d FETCH (FLAGS %s)", seq, imap_flags.data));
+    Error err = bufio_send_line(bio, tprintf("* %d FETCH (FLAGS %s)", seq, imap_flags.data));
     if (has_error(err)) return err;
-    return bufio_writeln(bio, tprintf(SV_Fmt " OK STORE completed", SV_Arg(tag)));
+    return bufio_send_line(bio, tprintf(SV_Fmt " OK STORE completed", SV_Arg(tag)));
 }
 
 static Error handle_expunge(BufIO* bio, const ImapSession* session, String tag) {
@@ -735,7 +735,7 @@ static Error handle_expunge(BufIO* bio, const ImapSession* session, String tag) 
 
     DIR* dir = opendir(dir_path.data);
     if (dir == NULL) {
-        return bufio_writeln(bio, tprintf(SV_Fmt " NO mailbox not found", SV_Arg(tag)));
+        return bufio_send_line(bio, tprintf(SV_Fmt " NO mailbox not found", SV_Arg(tag)));
     }
 
     // Collect all .eml filenames
@@ -757,7 +757,7 @@ static Error handle_expunge(BufIO* bio, const ImapSession* session, String tag) 
         if (f.deleted) {
             String full_path = tprintf(SV_Fmt "/" SV_Fmt, SV_Arg(dir_path), SV_Arg(files.data[i]));
             remove(full_path.data);
-            err = bufio_writeln(bio, tprintf("* %d EXPUNGE", seq));
+            err = bufio_send_line(bio, tprintf("* %d EXPUNGE", seq));
             if (has_error(err)) break;
             // do not increment seq — sequence numbers shift down after each expunge
         } else {
@@ -768,7 +768,7 @@ static Error handle_expunge(BufIO* bio, const ImapSession* session, String tag) 
     array_free(&files);
 
     if (has_error(err)) return err;
-    return bufio_writeln(bio, tprintf(SV_Fmt " OK EXPUNGE completed", SV_Arg(tag)));
+    return bufio_send_line(bio, tprintf(SV_Fmt " OK EXPUNGE completed", SV_Arg(tag)));
 }
 
 static Error handle_append(BufIO* bio, const ImapSession* session, String tag_in, String args) {
@@ -780,14 +780,14 @@ static Error handle_append(BufIO* bio, const ImapSession* session, String tag_in
     ssize_t lbrace = sv_find(args, "{");
     ssize_t rbrace = sv_find(args, "}");
     if (lbrace < 0 || rbrace < 0 || rbrace <= lbrace) {
-        return bufio_writeln(bio, tprintf(SV_Fmt " BAD APPEND requires literal {N}", SV_Arg(tag)));
+        return bufio_send_line(bio, tprintf(SV_Fmt " BAD APPEND requires literal {N}", SV_Arg(tag)));
     }
 
     String size_str = SV2(args.data + lbrace + 1, (size_t)(rbrace - lbrace - 1));
     char* endptr = NULL;
     int size = sv_to_int(sv_trim(size_str), &endptr);
     if (size < 0) {
-        return bufio_writeln(bio, tprintf(SV_Fmt " BAD invalid literal size", SV_Arg(tag)));
+        return bufio_send_line(bio, tprintf(SV_Fmt " BAD invalid literal size", SV_Arg(tag)));
     }
 
     String head = sv_trim(SV2(args.data, (size_t)lbrace));
@@ -801,7 +801,7 @@ static Error handle_append(BufIO* bio, const ImapSession* session, String tag_in
             if (head.data[i] == '"') { end_quote = (ssize_t)i; break; }
         }
         if (end_quote < 0) {
-            return bufio_writeln(bio, tprintf(SV_Fmt " BAD unterminated quoted name", SV_Arg(tag)));
+            return bufio_send_line(bio, tprintf(SV_Fmt " BAD unterminated quoted name", SV_Arg(tag)));
         }
         mailbox = SV2(head.data + 1, (size_t)(end_quote - 1));
         rest = sv_trim(SV2(head.data + end_quote + 1, head.length - (size_t)end_quote - 1));
@@ -812,7 +812,7 @@ static Error handle_append(BufIO* bio, const ImapSession* session, String tag_in
     }
 
     if (mailbox.length == 0) {
-        return bufio_writeln(bio, tprintf(SV_Fmt " BAD mailbox name required", SV_Arg(tag)));
+        return bufio_send_line(bio, tprintf(SV_Fmt " BAD mailbox name required", SV_Arg(tag)));
     }
 
     // Optional flag list "(\Seen \Draft ...)" — anything else (date-time) is ignored.
@@ -820,7 +820,7 @@ static Error handle_append(BufIO* bio, const ImapSession* session, String tag_in
     if (rest.length > 0 && rest.data[0] == '(') {
         ssize_t end_paren = sv_find(rest, ")");
         if (end_paren < 0) {
-            return bufio_writeln(bio, tprintf(SV_Fmt " BAD unterminated flag list", SV_Arg(tag)));
+            return bufio_send_line(bio, tprintf(SV_Fmt " BAD unterminated flag list", SV_Arg(tag)));
         }
         String flag_list = SV2(rest.data + 1, (size_t)(end_paren - 1));
         while (flag_list.length > 0) {
@@ -847,34 +847,17 @@ static Error handle_append(BufIO* bio, const ImapSession* session, String tag_in
         String user_dir = tprintf(SV_Fmt "/" SV_Fmt, SV_Arg(get_maildir()), SV_Arg(session->user));
         mkdir(user_dir.data, 0700);
         if (mkdir(dir_path.data, 0700) != 0 && errno != EEXIST) {
-            return bufio_writeln(bio, tprintf(SV_Fmt " NO failed to create mailbox: %s",
+            return bufio_send_line(bio, tprintf(SV_Fmt " NO failed to create mailbox: %s",
                                               SV_Arg(tag), strerror(errno)));
         }
     }
 
-    Error err = bufio_writeln(bio, SV("+ Ready for literal data"));
+    Error err = bufio_send_line(bio, SV("+ Ready for literal data"));
     if (has_error(err)) return err;
 
-    // bufio_read_n discards overflow, so drain pipelined bytes manually first.
-    StringBuilder body_sb = {0};
-    if (bio->overflow.length > 0) {
-        size_t take = bio->overflow.length < (size_t)size ? bio->overflow.length : (size_t)size;
-        sb_push_sv(&body_sb, SV2(bio->overflow.data, take));
-        if (take < bio->overflow.length) {
-            size_t leftover = bio->overflow.length - take;
-            memmove(bio->overflow.data, bio->overflow.data + take, leftover);
-            bio->overflow.length = leftover;
-        } else {
-            bio->overflow.length = 0;
-        }
-    }
-    if (body_sb.length < (size_t)size) {
-        err = bufio_read_n(bio, (size_t)size - body_sb.length);
-        if (has_error(err)) { sb_free(&body_sb); return err; }
-        sb_push_sv(&body_sb, sb_to_sv(&bio->read_buf));
-    }
-    String body = sv_clone(sb_to_sv(&body_sb));
-    sb_free(&body_sb);
+    err = bufio_read_n(bio, (size_t)size);
+    if (has_error(err)) return err;
+    String body = sv_clone(sb_to_sv(&bio->read_buf));
     err = bufio_read_until(bio, CRLF);
     if (has_error(err)) { safe_free(body.data); return err; }
 
@@ -898,18 +881,18 @@ static Error handle_append(BufIO* bio, const ImapSession* session, String tag_in
     err = write_entire_file(filename.data, body);
     safe_free(body.data);
     if (has_error(err)) {
-        return bufio_writeln(bio, tprintf(SV_Fmt " NO failed to write message", SV_Arg(tag)));
+        return bufio_send_line(bio, tprintf(SV_Fmt " NO failed to write message", SV_Arg(tag)));
     }
-    return bufio_writeln(bio, tprintf(SV_Fmt " OK APPEND completed", SV_Arg(tag)));
+    return bufio_send_line(bio, tprintf(SV_Fmt " OK APPEND completed", SV_Arg(tag)));
 }
 
 static Error handle_create(BufIO* bio, const ImapSession* session, String tag, String args) {
     String name = strip_quotes(sv_trim(args));
     if (name.length == 0) {
-        return bufio_writeln(bio, tprintf(SV_Fmt " BAD mailbox name required", SV_Arg(tag)));
+        return bufio_send_line(bio, tprintf(SV_Fmt " BAD mailbox name required", SV_Arg(tag)));
     }
     if (sv_equal_ignore_case(name, SV("INBOX"))) {
-        return bufio_writeln(bio, tprintf(SV_Fmt " NO cannot create INBOX", SV_Arg(tag)));
+        return bufio_send_line(bio, tprintf(SV_Fmt " NO cannot create INBOX", SV_Arg(tag)));
     }
 
     String user_dir = tprintf(SV_Fmt "/" SV_Fmt, SV_Arg(get_maildir()), SV_Arg(session->user));
@@ -918,20 +901,20 @@ static Error handle_create(BufIO* bio, const ImapSession* session, String tag, S
     String path = tprintf(SV_Fmt "/" SV_Fmt, SV_Arg(user_dir), SV_Arg(name));
     if (mkdir(path.data, 0700) != 0) {
         if (errno == EEXIST) {
-            return bufio_writeln(bio, tprintf(SV_Fmt " NO mailbox already exists", SV_Arg(tag)));
+            return bufio_send_line(bio, tprintf(SV_Fmt " NO mailbox already exists", SV_Arg(tag)));
         }
-        return bufio_writeln(bio, tprintf(SV_Fmt " NO %s", SV_Arg(tag), strerror(errno)));
+        return bufio_send_line(bio, tprintf(SV_Fmt " NO %s", SV_Arg(tag), strerror(errno)));
     }
-    return bufio_writeln(bio, tprintf(SV_Fmt " OK CREATE completed", SV_Arg(tag)));
+    return bufio_send_line(bio, tprintf(SV_Fmt " OK CREATE completed", SV_Arg(tag)));
 }
 
 static Error handle_delete(BufIO* bio, ImapSession* session, String tag, String args) {
     String name = strip_quotes(sv_trim(args));
     if (name.length == 0) {
-        return bufio_writeln(bio, tprintf(SV_Fmt " BAD mailbox name required", SV_Arg(tag)));
+        return bufio_send_line(bio, tprintf(SV_Fmt " BAD mailbox name required", SV_Arg(tag)));
     }
     if (sv_equal_ignore_case(name, SV("INBOX"))) {
-        return bufio_writeln(bio, tprintf(SV_Fmt " NO cannot delete INBOX", SV_Arg(tag)));
+        return bufio_send_line(bio, tprintf(SV_Fmt " NO cannot delete INBOX", SV_Arg(tag)));
     }
 
     String path = tprintf(SV_Fmt "/" SV_Fmt "/" SV_Fmt,
@@ -939,7 +922,7 @@ static Error handle_delete(BufIO* bio, ImapSession* session, String tag, String 
 
     DIR* dir = opendir(path.data);
     if (dir == NULL) {
-        return bufio_writeln(bio, tprintf(SV_Fmt " NO mailbox does not exist", SV_Arg(tag)));
+        return bufio_send_line(bio, tprintf(SV_Fmt " NO mailbox does not exist", SV_Arg(tag)));
     }
     struct dirent* entry;
     while ((entry = readdir(dir)) != NULL) {
@@ -951,7 +934,7 @@ static Error handle_delete(BufIO* bio, ImapSession* session, String tag, String 
     closedir(dir);
 
     if (rmdir(path.data) != 0) {
-        return bufio_writeln(bio, tprintf(SV_Fmt " NO %s", SV_Arg(tag), strerror(errno)));
+        return bufio_send_line(bio, tprintf(SV_Fmt " NO %s", SV_Arg(tag), strerror(errno)));
     }
 
     if (sv_equal(session->selected_mailbox, name)) {
@@ -959,7 +942,7 @@ static Error handle_delete(BufIO* bio, ImapSession* session, String tag, String 
         session->selected_mailbox = StringNil;
         session->state = IMAP_STATE_AUTHENTICATED;
     }
-    return bufio_writeln(bio, tprintf(SV_Fmt " OK DELETE completed", SV_Arg(tag)));
+    return bufio_send_line(bio, tprintf(SV_Fmt " OK DELETE completed", SV_Arg(tag)));
 }
 
 static Error handle_rename(BufIO* bio, ImapSession* session, String tag, String args) {
@@ -968,11 +951,11 @@ static Error handle_rename(BufIO* bio, ImapSession* session, String tag, String 
     String new_name = strip_quotes(sv_trim(pair.second));
 
     if (old_name.length == 0 || new_name.length == 0) {
-        return bufio_writeln(bio, tprintf(SV_Fmt " BAD RENAME requires two names", SV_Arg(tag)));
+        return bufio_send_line(bio, tprintf(SV_Fmt " BAD RENAME requires two names", SV_Arg(tag)));
     }
     // Renaming from INBOX has special semantics (move messages, keep INBOX) — not supported.
     if (sv_equal_ignore_case(old_name, SV("INBOX")) || sv_equal_ignore_case(new_name, SV("INBOX"))) {
-        return bufio_writeln(bio, tprintf(SV_Fmt " NO INBOX rename not supported", SV_Arg(tag)));
+        return bufio_send_line(bio, tprintf(SV_Fmt " NO INBOX rename not supported", SV_Arg(tag)));
     }
 
     String old_path = tprintf(SV_Fmt "/" SV_Fmt "/" SV_Fmt,
@@ -981,14 +964,14 @@ static Error handle_rename(BufIO* bio, ImapSession* session, String tag, String 
                               SV_Arg(get_maildir()), SV_Arg(session->user), SV_Arg(new_name));
 
     if (rename(old_path.data, new_path.data) != 0) {
-        return bufio_writeln(bio, tprintf(SV_Fmt " NO %s", SV_Arg(tag), strerror(errno)));
+        return bufio_send_line(bio, tprintf(SV_Fmt " NO %s", SV_Arg(tag), strerror(errno)));
     }
 
     if (sv_equal(session->selected_mailbox, old_name)) {
         safe_free(session->selected_mailbox.data);
         session->selected_mailbox = sv_clone(new_name);
     }
-    return bufio_writeln(bio, tprintf(SV_Fmt " OK RENAME completed", SV_Arg(tag)));
+    return bufio_send_line(bio, tprintf(SV_Fmt " OK RENAME completed", SV_Arg(tag)));
 }
 
 static Error handle_search(BufIO* bio, const ImapSession* session, String tag) {
@@ -1019,10 +1002,10 @@ static Error handle_search(BufIO* bio, const ImapSession* session, String tag) {
         for (int j = 0; j < len; j++) sb_push_char(&sb, buf[j]);
     }
 
-    Error err = bufio_writeln(bio, tprintf("* SEARCH %.*s", (int)sb.length, sb.data));
+    Error err = bufio_send_line(bio, tprintf("* SEARCH %.*s", (int)sb.length, sb.data));
     sb_free(&sb);
     if (has_error(err)) return err;
-    return bufio_writeln(bio, tprintf(SV_Fmt " OK SEARCH completed", SV_Arg(tag)));
+    return bufio_send_line(bio, tprintf(SV_Fmt " OK SEARCH completed", SV_Arg(tag)));
 }
 
 static void* handle_client(void* p) {
@@ -1030,7 +1013,7 @@ static void* handle_client(void* p) {
     BufIO bio = {.fd = client_fd};
     ImapSession session = {.state = IMAP_STATE_NOT_AUTHENTICATED};
 
-    bufio_writeln(&bio, SV("* OK [CAPABILITY " IMAP_CAPABILITY "] IMAP server ready"));
+    bufio_send_line(&bio, SV("* OK [CAPABILITY " IMAP_CAPABILITY "] IMAP server ready"));
 
     while (session.state != IMAP_STATE_LOGOUT) {
         Error err = bufio_read_until(&bio, CRLF);
@@ -1098,14 +1081,14 @@ static void* handle_client(void* p) {
             } else if (sv_equal_ignore_case(uid_cmd, SV("STORE"))) {
                 handle_store(&bio, &session, tag, uid_args);
             } else {
-                bufio_writeln(&bio, tprintf(SV_Fmt " BAD UID %s not supported", SV_Arg(tag), uid_cmd.data));
+                bufio_send_line(&bio, tprintf(SV_Fmt " BAD UID %s not supported", SV_Arg(tag), uid_cmd.data));
             }
         } else if (sv_equal_ignore_case(cmd, SV("LOGOUT"))) {
-            bufio_writeln(&bio, SV("* BYE logging out"));
-            bufio_writeln(&bio, tprintf(SV_Fmt " OK LOGOUT completed", SV_Arg(tag)));
+            bufio_send_line(&bio, SV("* BYE logging out"));
+            bufio_send_line(&bio, tprintf(SV_Fmt " OK LOGOUT completed", SV_Arg(tag)));
             session.state = IMAP_STATE_LOGOUT;
         } else {
-            bufio_writeln(&bio, tprintf(SV_Fmt " BAD command not recognized", SV_Arg(tag)));
+            bufio_send_line(&bio, tprintf(SV_Fmt " BAD command not recognized", SV_Arg(tag)));
         }
     }
 

@@ -149,49 +149,49 @@ Error smtp_send(const Email email) {
     err = smtp_expect_response(&bio, 220);
     if (has_error(err)) return err;
 
-    err = bufio_writeln(&bio, tprintf("EHLO " SV_Fmt, SV_Arg(get_hostname())));
+    err = bufio_send_line(&bio, tprintf("EHLO " SV_Fmt, SV_Arg(get_hostname())));
     if (has_error(err)) return err;
     err = smtp_expect_response(&bio, 250);
     if (has_error(err)) return err;
 
     // 1. MAIL FROM
-    err = bufio_writeln(&bio, tprintf("MAIL FROM:<" SV_Fmt ">", SV_Arg(email.from)));
+    err = bufio_send_line(&bio, tprintf("MAIL FROM:<" SV_Fmt ">", SV_Arg(email.from)));
     if (has_error(err)) return err;
     err = smtp_expect_response(&bio, 250);
     if (has_error(err)) return err;
 
     // 2. RCPT TO
-    err = bufio_writeln(&bio, tprintf("RCPT TO:<" SV_Fmt ">", SV_Arg(email.to)));
+    err = bufio_send_line(&bio, tprintf("RCPT TO:<" SV_Fmt ">", SV_Arg(email.to)));
     if (has_error(err)) return err;
     err = smtp_expect_response(&bio, 250);
     if (has_error(err)) return err;
 
     // 3. DATA
-    err = bufio_writeln(&bio, SV("DATA"));
+    err = bufio_send_line(&bio, SV("DATA"));
     if (has_error(err)) return err;
     err = smtp_expect_response(&bio, 354);
     if (has_error(err)) return err;
 
     // 4. Headers + body
-    err = bufio_writeln(&bio, tprintf("From: " SV_Fmt, SV_Arg(email.from)));
+    err = bufio_send_line(&bio, tprintf("From: " SV_Fmt, SV_Arg(email.from)));
     if (has_error(err)) return err;
-    err = bufio_writeln(&bio, tprintf("To: " SV_Fmt, SV_Arg(email.to)));
+    err = bufio_send_line(&bio, tprintf("To: " SV_Fmt, SV_Arg(email.to)));
     if (has_error(err)) return err;
-    err = bufio_writeln(&bio, tprintf("Subject: " SV_Fmt, SV_Arg(email.subject)));
+    err = bufio_send_line(&bio, tprintf("Subject: " SV_Fmt, SV_Arg(email.subject)));
     if (has_error(err)) return err;
-    err = bufio_writeln(&bio, SV(""));
+    err = bufio_send_line(&bio, SV(""));
     if (has_error(err)) return err;
-    err = bufio_writeln(&bio, email.body);
+    err = bufio_send_line(&bio, email.body);
     if (has_error(err)) return err;
 
     // 5. End with dot
-    err = bufio_writeln(&bio, SV("."));
+    err = bufio_send_line(&bio, SV("."));
     if (has_error(err)) return err;
     err = smtp_expect_response(&bio, 250);
     if (has_error(err)) return err;
 
     // 6. Quit
-    err = bufio_writeln(&bio, SV("QUIT"));
+    err = bufio_send_line(&bio, SV("QUIT"));
     if (has_error(err)) return err;
 
     bufio_close(&bio);
@@ -218,7 +218,7 @@ static void* handle_client(void* p) {
     String ehlo_host = StringNil;
 
     // Greeting
-    bufio_writeln(&bio, tprintf("220 " SV_Fmt " ESMTP ready", SV_Arg(get_hostname())));
+    bufio_send_line(&bio, tprintf("220 " SV_Fmt " ESMTP ready", SV_Arg(get_hostname())));
 
     INFO("SMTP: client connected");
 
@@ -238,13 +238,13 @@ static void* handle_client(void* p) {
             state = SMTP_STATE_GREETED;
             safe_free(ehlo_host.data);
             ehlo_host = sv_clone(rest);
-            bufio_writeln(&bio, tprintf("250 " SV_Fmt " greets " SV_Fmt, SV_Arg(get_hostname()), SV_Arg(rest)));
+            bufio_send_line(&bio, tprintf("250 " SV_Fmt " greets " SV_Fmt, SV_Arg(get_hostname()), SV_Arg(rest)));
 
         } else if (sv_equal_ignore_case(cmd, SV("MAIL"))) {
             const StringPair pair = sv_split_delim(rest, '<');
             mail_from = sv_clone(sv_split_delim(pair.second, '>').first);
             state = SMTP_STATE_MAIL_FROM;
-            bufio_writeln(&bio, SV("250 OK"));
+            bufio_send_line(&bio, SV("250 OK"));
 
         } else if (sv_equal_ignore_case(cmd, SV("RCPT"))) {
             const StringPair pair = sv_split_delim(rest, '<');
@@ -254,11 +254,11 @@ static void* handle_client(void* p) {
             String path = tprintf(SV_Fmt "/" SV_Fmt "/INBOX", SV_Arg(get_maildir()), SV_Arg(rcpt_to));
             if (!file_exists(path.data)) make_directory(path.data);
 
-            bufio_writeln(&bio, SV("250 OK"));
+            bufio_send_line(&bio, SV("250 OK"));
 
         } else if (sv_equal_ignore_case(cmd, SV("DATA"))) {
             state = SMTP_STATE_DATA;
-            bufio_writeln(&bio, SV("354 Start input, end with <CRLF>.<CRLF>"));
+            bufio_send_line(&bio, SV("354 Start input, end with <CRLF>.<CRLF>"));
 
             err = bufio_read_until(&bio, CRLF "." CRLF);
             if (has_error(err)) break;
@@ -275,14 +275,14 @@ static void* handle_client(void* p) {
                 SV_Arg(sender_host));
             write_entire_file(filename.data, body);
 
-            bufio_writeln(&bio, SV("250 OK queued"));
+            bufio_send_line(&bio, SV("250 OK queued"));
 
         } else if (sv_equal_ignore_case(cmd, SV("QUIT"))) {
             state = SMTP_STATE_QUIT;
-            bufio_writeln(&bio, SV("221 Bye"));
+            bufio_send_line(&bio, SV("221 Bye"));
 
         } else {
-            bufio_writeln(&bio, SV("502 Command not implemented"));
+            bufio_send_line(&bio, SV("502 Command not implemented"));
         }
     }
 

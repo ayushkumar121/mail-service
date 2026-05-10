@@ -264,8 +264,8 @@ Error bufio_read_until(BufIO* bio, const char* terminator);
 Error bufio_read_n(BufIO* bio, size_t n);
 Error bufio_read_line(BufIO* bio);
 Error bufio_read_all(BufIO* bio);
-Error bufio_write(BufIO* bio, String data);
-Error bufio_writeln(BufIO* bio, String data);
+Error bufio_send(BufIO* bio, String data);
+Error bufio_send_line(BufIO* bio, String data);
 Error bufio_flush(BufIO* bio);
 void  bufio_close(BufIO* bio);
 
