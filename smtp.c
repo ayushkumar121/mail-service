@@ -125,10 +125,19 @@ Error smtp_expect_response(BufIO* bio, int expected) {
     return ErrorNil;
 }
 
-Error smtp_relay(String host, int port, String from, String to, String raw_msg) {
-    BufIO bio = {0};
-    Error err = smtp_connect(&bio, host, port);
+Error smtp_relay(String from, String to, String raw_msg) {
+    String domain = sv_split_delim(to, '@').second;
+    if (domain.length == 0) return errorf("relay: no domain in '" SV_Fmt "'", SV_Arg(to));
+
+    StringBuilder mx = {0};
+    Error err = smtp_lookup_server(domain, &mx);
     if (has_error(err)) return err;
+    String host = sb_to_sv(&mx);
+    INFO("MX " SV_Fmt " -> " SV_Fmt, SV_Arg(domain), SV_Arg(host));
+
+    BufIO bio = {0};
+    err = smtp_connect(&bio, host, 25);
+    if (has_error(err)) { sb_free(&mx); return err; }
     err = smtp_expect_response(&bio, 220); if (has_error(err)) return err;
 
     err = bufio_send_line(&bio, tprintf("EHLO " SV_Fmt, SV_Arg(get_hostname())));
@@ -162,81 +171,7 @@ Error smtp_relay(String host, int port, String from, String to, String raw_msg) 
 
     bufio_send_line(&bio, SV("QUIT"));
     bufio_close(&bio);
-    return ErrorNil;
-}
-
-Error smtp_send(const Email email) {
-    Error err;
-    const String domain = sv_split_delim(email.to, '@').second;
-
-    String smtp_server;
-    int smtp_port = 25;
-
-    if (sv_equal(domain, SV("localhost"))) {
-        smtp_server = domain;
-    } else {
-        StringBuilder builder = {0};
-        err = smtp_lookup_server(domain, &builder);
-        if (has_error(err)) return err;
-        smtp_server = sb_to_sv(&builder);
-    }
-
-    // TODO: TLS
-
-    BufIO bio = {0};
-    err = smtp_connect(&bio, smtp_server, smtp_port);
-    if (has_error(err)) return err;
-
-    err = smtp_expect_response(&bio, 220);
-    if (has_error(err)) return err;
-
-    err = bufio_send_line(&bio, tprintf("EHLO " SV_Fmt, SV_Arg(get_hostname())));
-    if (has_error(err)) return err;
-    err = smtp_expect_response(&bio, 250);
-    if (has_error(err)) return err;
-
-    // 1. MAIL FROM
-    err = bufio_send_line(&bio, tprintf("MAIL FROM:<" SV_Fmt ">", SV_Arg(email.from)));
-    if (has_error(err)) return err;
-    err = smtp_expect_response(&bio, 250);
-    if (has_error(err)) return err;
-
-    // 2. RCPT TO
-    err = bufio_send_line(&bio, tprintf("RCPT TO:<" SV_Fmt ">", SV_Arg(email.to)));
-    if (has_error(err)) return err;
-    err = smtp_expect_response(&bio, 250);
-    if (has_error(err)) return err;
-
-    // 3. DATA
-    err = bufio_send_line(&bio, SV("DATA"));
-    if (has_error(err)) return err;
-    err = smtp_expect_response(&bio, 354);
-    if (has_error(err)) return err;
-
-    // 4. Headers + body
-    err = bufio_send_line(&bio, tprintf("From: " SV_Fmt, SV_Arg(email.from)));
-    if (has_error(err)) return err;
-    err = bufio_send_line(&bio, tprintf("To: " SV_Fmt, SV_Arg(email.to)));
-    if (has_error(err)) return err;
-    err = bufio_send_line(&bio, tprintf("Subject: " SV_Fmt, SV_Arg(email.subject)));
-    if (has_error(err)) return err;
-    err = bufio_send_line(&bio, SV(""));
-    if (has_error(err)) return err;
-    err = bufio_send_line(&bio, email.body);
-    if (has_error(err)) return err;
-
-    // 5. End with dot
-    err = bufio_send_line(&bio, SV("."));
-    if (has_error(err)) return err;
-    err = smtp_expect_response(&bio, 250);
-    if (has_error(err)) return err;
-
-    // 6. Quit
-    err = bufio_send_line(&bio, SV("QUIT"));
-    if (has_error(err)) return err;
-
-    bufio_close(&bio);
-    DEBUG("Message sent");
+    sb_free(&mx);
     return ErrorNil;
 }
 
@@ -323,22 +258,13 @@ static void* handle_client(void* p) {
                 write_entire_file(filename.data, body);
                 bufio_send_line(&bio, SV("250 OK queued"));
             } else {
-                String relay_host = config_get_string(SV("relay.host"), SV(""));
-                int relay_port = config_get_int(SV("relay.port"), 1025);
-                if (relay_host.length == 0) {
-                    INFO("non-local rcpt " SV_Fmt " but no relay configured; rejecting",
-                         SV_Arg(rcpt_to));
-                    bufio_send_line(&bio, SV("550 relaying not allowed"));
+                INFO("relaying " SV_Fmt " from " SV_Fmt, SV_Arg(rcpt_to), SV_Arg(mail_from));
+                Error rerr = smtp_relay(mail_from, rcpt_to, body);
+                if (has_error(rerr)) {
+                    ERROR("relay failed: " SV_Fmt, SV_Arg(rerr.message));
+                    bufio_send_line(&bio, SV("451 relay failed; try later"));
                 } else {
-                    INFO("relaying to " SV_Fmt " via " SV_Fmt ":%d",
-                         SV_Arg(rcpt_to), SV_Arg(relay_host), relay_port);
-                    Error rerr = smtp_relay(relay_host, relay_port, mail_from, rcpt_to, body);
-                    if (has_error(rerr)) {
-                        ERROR("relay failed: " SV_Fmt, SV_Arg(rerr.message));
-                        bufio_send_line(&bio, SV("451 relay failed; try later"));
-                    } else {
-                        bufio_send_line(&bio, SV("250 OK relayed"));
-                    }
+                    bufio_send_line(&bio, SV("250 OK relayed"));
                 }
             }
             safe_free(body.data);
