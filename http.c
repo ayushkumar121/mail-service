@@ -204,7 +204,7 @@ HttpError http_parse_request(const int client, StringBuilder *sb,
     return HttpErrorParse;
   }
 
-  request->request_id = random_id();
+  request->request_id = sv_clone(random_id(RANDOM_ID_LEN));
   request->proto = p3.first;
   request->method = p1.first;
   request->path = p2.first;
@@ -379,6 +379,8 @@ static void *handle_client(void *arg) {
     if (response.free_body_after_use)
       free(response.body.data);
     http_headers_free(&response.headers);
+    safe_free(request.request_id.data);
+    treset();
 
     if (!response.keep_alive) {
       break;

@@ -264,9 +264,21 @@ Error bufio_read_until(BufIO* bio, const char* terminator);
 Error bufio_read_n(BufIO* bio, size_t n);
 Error bufio_read_line(BufIO* bio);
 Error bufio_read_all(BufIO* bio);
-Error bufio_send(BufIO* bio, String data);
-Error bufio_send_line(BufIO* bio, String data);
+// Append to the internal write buffer without flushing. Must be paired with bufio_flush.
+void  bufio_write(BufIO* bio, String data);
+void  bufio_write_line(BufIO* bio, String data);
 Error bufio_flush(BufIO* bio);
+
+// Append + flush in one call. Use for single-shot replies; for batched output,
+// call bufio_write_line repeatedly and finish with bufio_flush (or bufio_send_line).
+static inline Error bufio_send(BufIO* bio, String data) {
+    bufio_write(bio, data);
+    return bufio_flush(bio);
+}
+static inline Error bufio_send_line(BufIO* bio, String data) {
+    bufio_write_line(bio, data);
+    return bufio_flush(bio);
+}
 void  bufio_close(BufIO* bio);
 
 // Priority Queue

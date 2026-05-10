@@ -1240,19 +1240,14 @@ Error bufio_read_all(BufIO* bio) {
     return ErrorNil;
 }
 
-Error bufio_send(BufIO* bio, String data) {
-    bio->write_buf.length = 0;
+// Append to the internal write buffer. Nothing is sent until bufio_flush is called.
+void bufio_write(BufIO* bio, String data) {
     sb_push_sv(&bio->write_buf, data);
-
-    return bufio_flush(bio);
 }
 
-Error bufio_send_line(BufIO* bio, String data) {
-    bio->write_buf.length = 0;
+void bufio_write_line(BufIO* bio, String data) {
     sb_push_sv(&bio->write_buf, data);
     sb_push_sv(&bio->write_buf, SV("\r\n"));
-
-    return bufio_flush(bio);
 }
 
 Error bufio_flush(BufIO* bio) {
@@ -1264,10 +1259,13 @@ Error bufio_flush(BufIO* bio) {
             if (errno == EAGAIN || errno == EINTR || errno == EWOULDBLOCK) continue;
             return errorf("bufio write failed: %s", strerror(errno));
         }
-        if (n == 0) return errorf("bufio connection closed");
+        if (n == 0) {
+            bio->write_buf.length = 0;
+            return errorf("bufio connection closed");
+        }
         total_written += n;
     }
-
+    bio->write_buf.length = 0;
     return ErrorNil;
 }
 

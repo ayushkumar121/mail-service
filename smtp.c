@@ -284,6 +284,8 @@ static void* handle_client(void* p) {
         } else {
             bufio_send_line(&bio, SV("502 Command not implemented"));
         }
+
+        treset();
     }
 
     safe_free(mail_from.data);
