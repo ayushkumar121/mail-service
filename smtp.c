@@ -333,7 +333,7 @@ Error smtp_server_listen(const SmtpServer* server) {
         return errorf("listen failed: %s\n", strerror(errno));
     }
 
-    INFO("SMTP server started");
+    INFO("server started");
     while (true) {
         const int client_fd = accept(server->sock_fd, NULL, NULL);
         if (client_fd < 0) {

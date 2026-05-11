@@ -1243,7 +1243,7 @@ Error imap_server_listen(const ImapServer* server) {
         return errorf("listen failed: %s\n", strerror(errno));
     }
 
-    INFO("IMAP server started");
+    INFO("server started");
     while (true) {
         const int client_fd = accept(server->sock_fd, NULL, NULL);
         if (client_fd < 0) {

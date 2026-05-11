@@ -1,3 +1,5 @@
+#define LOG_PREFIX "http: "
+
 #include "http.h"
 #include "basic.h"
 
