@@ -1,6 +1,16 @@
 #include "smtp.h"
 #include "maildir.h"
 
+// Prefix every log line emitted from this file with "smtp:".
+#undef DEBUG
+#undef INFO
+#undef WARN
+#undef ERROR
+#define DEBUG(fmt, ...) fprintf(stderr, "DEBUG: smtp: " fmt "\n", ##__VA_ARGS__)
+#define INFO(fmt, ...)  fprintf(stderr, "INFO: smtp: "  fmt "\n", ##__VA_ARGS__)
+#define WARN(fmt, ...)  fprintf(stderr, "WARN: smtp: "  fmt "\n", ##__VA_ARGS__)
+#define ERROR(fmt, ...) fprintf(stderr, "ERROR: smtp: " fmt "\n", ##__VA_ARGS__)
+
 #include <errno.h>
 #include <resolv.h>
 #include <arpa/nameser.h>
@@ -103,7 +113,7 @@ Error smtp_read_from_server(BufIO* bio) {
         scan_offset += n;
     }
 
-    DEBUG("smtp recv: " SV_Fmt, SV_Arg(bio->read_buf));
+    DEBUG("recv: " SV_Fmt, SV_Arg(bio->read_buf));
     return ErrorNil;
 }
 
@@ -196,12 +206,12 @@ static void* handle_client(void* p) {
     // Greeting
     bufio_send_line(&bio, tprintf("220 " SV_Fmt " ESMTP ready", SV_Arg(get_hostname())));
 
-    INFO("SMTP: client connected");
+    INFO("client connected");
 
     while (state != SMTP_STATE_QUIT) {
         Error err = bufio_read_until(&bio, CRLF);
         if (has_error(err)) {
-            ERROR("smtp recv failed: " SV_Fmt, SV_Arg(err.message));
+            ERROR("recv failed: " SV_Fmt, SV_Arg(err.message));
             break;
         }
 
@@ -256,6 +266,8 @@ static void* handle_client(void* p) {
                     SV_Arg(sender_host),
                     uid);
                 write_entire_file(filename.data, body);
+                INFO("saved " SV_Fmt " (%zu bytes) for " SV_Fmt,
+                     SV_Arg(filename), body.length, SV_Arg(rcpt_to));
                 bufio_send_line(&bio, SV("250 OK queued"));
             } else {
                 INFO("delivering to " SV_Fmt " from " SV_Fmt, SV_Arg(rcpt_to), SV_Arg(mail_from));

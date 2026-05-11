@@ -1,5 +1,15 @@
 #include "imap.h"
 
+// Prefix every log line emitted from this file with "imap:".
+#undef DEBUG
+#undef INFO
+#undef WARN
+#undef ERROR
+#define DEBUG(fmt, ...) fprintf(stderr, "DEBUG: imap: " fmt "\n", ##__VA_ARGS__)
+#define INFO(fmt, ...)  fprintf(stderr, "INFO: imap: "  fmt "\n", ##__VA_ARGS__)
+#define WARN(fmt, ...)  fprintf(stderr, "WARN: imap: "  fmt "\n", ##__VA_ARGS__)
+#define ERROR(fmt, ...) fprintf(stderr, "ERROR: imap: " fmt "\n", ##__VA_ARGS__)
+
 #include <pthread.h>
 #include <unistd.h>
 
@@ -858,10 +868,13 @@ static Error handle_append(BufIO* bio, const ImapSession* session, String tag_in
     String filename = maildir_filename(base, uid, flags);
 
     err = write_entire_file(filename.data, body);
-    safe_free(body.data);
     if (has_error(err)) {
+        safe_free(body.data);
         return bufio_send_line(bio, tprintf(SV_Fmt " NO failed to write message", SV_Arg(tag)));
     }
+    INFO("APPEND saved " SV_Fmt " (%zu bytes) uid=%d",
+         SV_Arg(filename), body.length, uid);
+    safe_free(body.data);
     return bufio_send_line(bio, tprintf(SV_Fmt " OK [APPENDUID 1 %d] APPEND completed",
                                         SV_Arg(tag), uid));
 }
@@ -1060,8 +1073,10 @@ static Error handle_copy_ex(BufIO* bio, const ImapSession* session, String tag, 
         String dst_full = maildir_filename(base, dst_uid, f);
 
         err = write_entire_file(dst_full.data, sb_to_sv(&body));
+        if (has_error(err)) { sb_free(&body); break; }
+        INFO("COPY saved " SV_Fmt " (%zu bytes) src_uid=%d dst_uid=%d",
+             SV_Arg(dst_full), body.length, src_uid, dst_uid);
         sb_free(&body);
-        if (has_error(err)) break;
 
         if (src_set.length > 0) sb_push_char(&src_set, ',');
         sb_push_sv(&src_set, tprintf("%d", src_uid));
@@ -1106,7 +1121,7 @@ static void* handle_client(void* p) {
     while (session.state != IMAP_STATE_LOGOUT) {
         Error err = bufio_read_until(&bio, CRLF);
         if (has_error(err)) {
-            ERROR("imap read failed: " SV_Fmt, SV_Arg(err.message));
+            ERROR("read failed: " SV_Fmt, SV_Arg(err.message));
             break;
         }
 
