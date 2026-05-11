@@ -2,11 +2,12 @@ MAIN=mail-service
 CC=cc
 CFLAGS=-Wall -g -D_GNU_SOURCE
 LIBS= -lresolv -lm
+LDFLAGS= -rdynamic
 
 OBJS=http.o basic.o config.o maildir.o smtp.o imap.o
 
 $(MAIN): $(MAIN).c $(OBJS)
-	$(CC) -o $@ $^ $(CFLAGS) $(LIBS)
+	$(CC) -o $@ $^ $(CFLAGS) $(LDFLAGS) $(LIBS)
 
 %.o: %.c %.h
 	$(CC) -c -o $@ $< $(CFLAGS)

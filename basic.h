@@ -21,6 +21,7 @@
 #define INFO(format, ...)  fprintf(stderr, "<6>INFO: "  LOG_PREFIX format "\n", ##__VA_ARGS__)
 #define WARN(format, ...)  fprintf(stderr, "<4>WARN: "  LOG_PREFIX format "\n", ##__VA_ARGS__)
 #define ERROR(format, ...) fprintf(stderr, "<3>ERROR: " LOG_PREFIX format "\n", ##__VA_ARGS__)
+#define CRITICAL(format, ...) fprintf(stderr, "<2>CRITICAL: " LOG_PREFIX format "\n", ##__VA_ARGS__)
 
 #define PAIR(T1, T2)                                                           \
   struct {                                                                     \
