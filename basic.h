@@ -12,16 +12,15 @@
 #define safe_free(ptr) if (ptr) {free(ptr); (ptr) = NULL;}
 
 // Modules can set LOG_PREFIX (a string literal) before any log call to scope
-// their messages, e.g. `#define LOG_PREFIX "imap: "` at the top of imap.c.
-// Default is empty.
 #ifndef LOG_PREFIX
 #define LOG_PREFIX ""
 #endif
 
-#define DEBUG(format, ...) fprintf(stderr, "DEBUG: " LOG_PREFIX format "\n", ##__VA_ARGS__)
-#define INFO(format, ...)  fprintf(stderr, "INFO: "  LOG_PREFIX format "\n", ##__VA_ARGS__)
-#define WARN(format, ...)  fprintf(stderr, "WARN: "  LOG_PREFIX format "\n", ##__VA_ARGS__)
-#define ERROR(format, ...) fprintf(stderr, "ERROR: " LOG_PREFIX format "\n", ##__VA_ARGS__)
+// Leading "<N>" is a syslog priority prefix (RFC 5424);
+#define DEBUG(format, ...) fprintf(stderr, "<7>DEBUG: " LOG_PREFIX format "\n", ##__VA_ARGS__)
+#define INFO(format, ...)  fprintf(stderr, "<6>INFO: "  LOG_PREFIX format "\n", ##__VA_ARGS__)
+#define WARN(format, ...)  fprintf(stderr, "<4>WARN: "  LOG_PREFIX format "\n", ##__VA_ARGS__)
+#define ERROR(format, ...) fprintf(stderr, "<3>ERROR: " LOG_PREFIX format "\n", ##__VA_ARGS__)
 
 #define PAIR(T1, T2)                                                           \
   struct {                                                                     \
