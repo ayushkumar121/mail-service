@@ -9,7 +9,8 @@ double config_get_double(String key, int default_value);
 int config_get_int(String key, int default_value);
 void config_free(void);
 
-String get_hostname(void);
+String get_hostname(void);      // server.host — FQDN we advertise (EHLO/banner)
+String get_local_domain(void);  // server.local_domain — @domain we accept as local
 String get_maildir(void);
 
 #endif

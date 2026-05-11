@@ -240,7 +240,7 @@ static void* handle_client(void* p) {
             body.length -= strlen(CRLF "." CRLF);
 
             String rcpt_domain = sv_split_delim(rcpt_to, '@').second;
-            bool is_local = sv_equal_ignore_case(rcpt_domain, get_hostname())
+            bool is_local = sv_equal_ignore_case(rcpt_domain, get_local_domain())
                          || sv_equal_ignore_case(rcpt_domain, SV("localhost"));
 
             if (is_local) {

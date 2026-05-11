@@ -58,6 +58,14 @@ String get_hostname(void) {
   return host;
 }
 
+String get_local_domain(void) {
+  static String local_domain;
+  if (local_domain.length == 0) {
+    local_domain = config_get_string(SV("server.local_domain"), get_hostname());
+  }
+  return local_domain;
+}
+
 String get_maildir(void) {
   static String maildir;
   if (maildir.length == 0) {
