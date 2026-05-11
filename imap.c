@@ -1,14 +1,5 @@
+#define LOG_PREFIX "imap: "
 #include "imap.h"
-
-// Prefix every log line emitted from this file with "imap:".
-#undef DEBUG
-#undef INFO
-#undef WARN
-#undef ERROR
-#define DEBUG(fmt, ...) fprintf(stderr, "DEBUG: imap: " fmt "\n", ##__VA_ARGS__)
-#define INFO(fmt, ...)  fprintf(stderr, "INFO: imap: "  fmt "\n", ##__VA_ARGS__)
-#define WARN(fmt, ...)  fprintf(stderr, "WARN: imap: "  fmt "\n", ##__VA_ARGS__)
-#define ERROR(fmt, ...) fprintf(stderr, "ERROR: imap: " fmt "\n", ##__VA_ARGS__)
 
 #include <pthread.h>
 #include <unistd.h>

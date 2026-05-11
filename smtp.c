@@ -1,15 +1,6 @@
+#define LOG_PREFIX "smtp: "
 #include "smtp.h"
 #include "maildir.h"
-
-// Prefix every log line emitted from this file with "smtp:".
-#undef DEBUG
-#undef INFO
-#undef WARN
-#undef ERROR
-#define DEBUG(fmt, ...) fprintf(stderr, "DEBUG: smtp: " fmt "\n", ##__VA_ARGS__)
-#define INFO(fmt, ...)  fprintf(stderr, "INFO: smtp: "  fmt "\n", ##__VA_ARGS__)
-#define WARN(fmt, ...)  fprintf(stderr, "WARN: smtp: "  fmt "\n", ##__VA_ARGS__)
-#define ERROR(fmt, ...) fprintf(stderr, "ERROR: smtp: " fmt "\n", ##__VA_ARGS__)
 
 #include <errno.h>
 #include <resolv.h>

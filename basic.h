@@ -11,10 +11,17 @@
 
 #define safe_free(ptr) if (ptr) {free(ptr); (ptr) = NULL;}
 
-#define DEBUG(format, ...) fprintf(stderr, "DEBUG: " format "\n", ##__VA_ARGS__)
-#define INFO(format, ...) fprintf(stderr, "INFO: " format "\n", ##__VA_ARGS__)
-#define WARN(format, ...) fprintf(stderr, "WARN: " format "\n", ##__VA_ARGS__)
-#define ERROR(format, ...) fprintf(stderr, "ERROR: " format "\n", ##__VA_ARGS__)
+// Modules can set LOG_PREFIX (a string literal) before any log call to scope
+// their messages, e.g. `#define LOG_PREFIX "imap: "` at the top of imap.c.
+// Default is empty.
+#ifndef LOG_PREFIX
+#define LOG_PREFIX ""
+#endif
+
+#define DEBUG(format, ...) fprintf(stderr, "DEBUG: " LOG_PREFIX format "\n", ##__VA_ARGS__)
+#define INFO(format, ...)  fprintf(stderr, "INFO: "  LOG_PREFIX format "\n", ##__VA_ARGS__)
+#define WARN(format, ...)  fprintf(stderr, "WARN: "  LOG_PREFIX format "\n", ##__VA_ARGS__)
+#define ERROR(format, ...) fprintf(stderr, "ERROR: " LOG_PREFIX format "\n", ##__VA_ARGS__)
 
 #define PAIR(T1, T2)                                                           \
   struct {                                                                     \
