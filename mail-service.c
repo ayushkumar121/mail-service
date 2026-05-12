@@ -11,6 +11,19 @@
 #include "imap.h"
 #include "smtp.h"
 
+static SmtpServer smtp_server;
+static ImapServer imap_server;
+
+static void *smtp_thread(void* arg) {
+    try(smtp_server_listen((SmtpServer*)arg));
+    return NULL;
+}
+
+static void *imap_thread(void* arg) {
+    try(imap_server_listen((ImapServer*)arg));
+    return NULL;
+}
+
 static void crash_handler(int sig) {
     void* frames[64];
     int n = backtrace(frames, 64);
@@ -29,16 +42,6 @@ static void setup_signals() {
     signal(SIGBUS, crash_handler);
 }
 
-static void *smtp_thread(void* arg) {
-    try(smtp_server_listen((SmtpServer*)arg));
-    return NULL;
-}
-
-static void *imap_thread(void* arg) {
-    try(imap_server_listen((ImapServer*)arg));
-    return NULL;
-}
-
 int main(int argc, char** argv) {
     setup_signals();
 
@@ -47,10 +50,7 @@ int main(int argc, char** argv) {
 
     INFO("Setting up maildir: "SV_Fmt, SV_Arg(get_maildir()));
 
-    SmtpServer smtp_server = {0};
     try(smtp_server_init(&smtp_server));
-
-    ImapServer imap_server = {0};
     try(imap_server_init(&imap_server));
 
     pthread_t smtp_tid;
