@@ -1,8 +1,8 @@
 {
   "server": {
-    "host": "mail.ayush-kumar.com",
+    "host": "ayush-kumar.com",
     "local_domain": "ayush-kumar.com",
-    "maildir": "/var/mail-service/maildir",
+    "maildir": "maildir",
     "smtp": { "port": 25 },
     "imap": { "port": 143 },
     "http": { "port": 8080 }

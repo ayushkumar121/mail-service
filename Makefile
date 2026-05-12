@@ -15,7 +15,7 @@ $(MAIN): $(MAIN).c $(OBJS)
 test: $(MAIN)
 	@pkill -f $(MAIN) 2>/dev/null; sleep 0.3; true
 	@bash tests/setup_fixture.sh
-	@./$(MAIN) > /tmp/mail-service.log 2>&1 & SERVER_PID=$$!; \
+	@./$(MAIN) tests/config.json > /tmp/mail-service.log 2>&1 & SERVER_PID=$$!; \
 	  bash tests/tests.sh; STATUS=$$?; \
 	  kill $$SERVER_PID 2>/dev/null; exit $$STATUS
 
