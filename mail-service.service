@@ -1,0 +1,16 @@
+[Unit]
+Description=mail-service
+After=network.target
+
+[Service]
+Type=simple
+ExecStart=/opt/mail-service/mail-service /etc/mail-service.json
+WorkingDirectory=/opt/mail-service
+User=root
+Restart=on-failure
+RestartSec=2
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target
