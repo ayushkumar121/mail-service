@@ -2,6 +2,8 @@
 
 #include <dirent.h>
 #include <string.h>
+#include <stdio.h>
+#include <time.h>
 
 // Find ";KEY=" or ",KEY=" in filename and return the value substring.
 // Stops at the next ',' or '.' or end-of-string.
@@ -103,4 +105,28 @@ int cmp_by_uid(const void* a, const void* b) {
     int ua = parse_uid(*(const String*)a);
     int ub = parse_uid(*(const String*)b);
     return (ua > ub) - (ua < ub);
+}
+
+int get_uidvalidity(const char* dir_path) {
+    String path = tprintf("%s/.uidvalidity", dir_path);
+
+    // Try to read existing value
+    FILE* f = fopen(path.data, "r");
+    if (f) {
+        int v = 0;
+        if (fscanf(f, "%d", &v) == 1 && v > 0) {
+            fclose(f);
+            return v;
+        }
+        fclose(f);
+    }
+
+    // Generate and persist
+    int v = (int)time(NULL);
+    f = fopen(path.data, "w");
+    if (f) {
+        fprintf(f, "%d\n", v);
+        fclose(f);
+    }
+    return v;
 }

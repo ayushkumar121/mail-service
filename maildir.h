@@ -32,6 +32,11 @@ String set_flag(String filename, char flag_char);  // toggles one flag, preserve
 // UID allocation — scans the directory for the current max U=N. O(n).
 int next_uid(const char* dir_path);
 
+// Persistent UIDVALIDITY per mailbox. Reads <dir>/.uidvalidity; creates the
+// file with the current time(NULL) on first call. A new maildir gets a fresh
+// value, signalling IMAP clients to discard their UID cache for it.
+int get_uidvalidity(const char* dir_path);
+
 // qsort comparator: ascending UID order
 int cmp_by_uid(const void* a, const void* b);
 

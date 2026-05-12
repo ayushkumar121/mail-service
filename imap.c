@@ -167,10 +167,11 @@ static Error handle_select(BufIO* bio, ImapSession* session, String tag, String 
         closedir(dir);
     }
 
+    int uidvalidity = get_uidvalidity(path.data);
     bufio_write_line(bio, SV("* FLAGS (\\Seen \\Answered \\Flagged \\Deleted \\Draft)"));
     bufio_write_line(bio, tprintf("* %d EXISTS", count));
     bufio_write_line(bio, tprintf("* %d RECENT", unseen));
-    bufio_write_line(bio, SV("* OK [UIDVALIDITY 1] UIDs valid"));
+    bufio_write_line(bio, tprintf("* OK [UIDVALIDITY %d] UIDs valid", uidvalidity));
     bufio_write_line(bio, tprintf("* OK [UIDNEXT %d] Predicted next UID", count + 1));
     bufio_write_line(bio, SV("* OK [PERMANENTFLAGS (\\Seen \\Answered \\Flagged \\Deleted \\Draft)] Limited"));
     return bufio_send_line(bio, tprintf(SV_Fmt " OK [READ-WRITE] SELECT completed", SV_Arg(tag)));
@@ -584,7 +585,7 @@ static Error handle_status(BufIO* bio, const ImapSession* session, String tag, S
         else if (sv_equal_ignore_case(tok, SV("RECENT")))      sb_push_sv(&out, tprintf("RECENT %d", unseen));
         else if (sv_equal_ignore_case(tok, SV("UNSEEN")))      sb_push_sv(&out, tprintf("UNSEEN %d", unseen));
         else if (sv_equal_ignore_case(tok, SV("UIDNEXT")))     sb_push_sv(&out, tprintf("UIDNEXT %d", total + 1));
-        else if (sv_equal_ignore_case(tok, SV("UIDVALIDITY"))) sb_push_sv(&out, SV("UIDVALIDITY 1"));
+        else if (sv_equal_ignore_case(tok, SV("UIDVALIDITY"))) sb_push_sv(&out, tprintf("UIDVALIDITY %d", get_uidvalidity(path.data)));
         else { sb_push_sv(&out, tok); sb_push_sv(&out, SV(" 0")); }
         first = false;
     }
@@ -866,8 +867,8 @@ static Error handle_append(BufIO* bio, const ImapSession* session, String tag_in
     INFO("APPEND saved " SV_Fmt " (%zu bytes) uid=%d",
          SV_Arg(filename), body.length, uid);
     safe_free(body.data);
-    return bufio_send_line(bio, tprintf(SV_Fmt " OK [APPENDUID 1 %d] APPEND completed",
-                                        SV_Arg(tag), uid));
+    return bufio_send_line(bio, tprintf(SV_Fmt " OK [APPENDUID %d %d] APPEND completed",
+                                        SV_Arg(tag), get_uidvalidity(dir_path.data), uid));
 }
 
 static Error handle_create(BufIO* bio, const ImapSession* session, String tag, String args) {
@@ -1086,8 +1087,9 @@ static Error handle_copy_ex(BufIO* bio, const ImapSession* session, String tag, 
     }
 
     Error res = src_set.length > 0
-        ? bufio_send_line(bio, tprintf(SV_Fmt " OK [COPYUID 1 %.*s %.*s] %s completed",
+        ? bufio_send_line(bio, tprintf(SV_Fmt " OK [COPYUID %d %.*s %.*s] %s completed",
                                        SV_Arg(tag),
+                                       get_uidvalidity(dst_path.data),
                                        (int)src_set.length, src_set.data,
                                        (int)dst_set.length, dst_set.data,
                                        is_uid ? "UID COPY" : "COPY"))
