@@ -1,0 +1,2 @@
+# mail-service: scrape /metrics every 5 minutes
+*/5 * * * * root /opt/mail-service/scrape-metrics.sh
