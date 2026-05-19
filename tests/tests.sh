@@ -5,8 +5,8 @@
 
 HOST="localhost"
 PORT=143
-USER="testuser"
-PASS="anypassword"
+USER="testuser@ayush-kumar.com"
+PASS="testpass"
 IMAP_URL="imap://$HOST:$PORT"
 
 PASS_COUNT=0
@@ -80,7 +80,7 @@ else
 fi
 
 # | L4 | LIST hierarchy probe (LIST "" "")
-T=$(nc_send $'a1 LIST "" ""\r\na2 LOGOUT\r\n')
+T=$(nc_send $"a1 LOGIN $USER $PASS\r\na2 LIST \"\" \"\"\r\na3 LOGOUT\r\n")
 run_test "L4  LIST hierarchy probe: Noselect"    "Noselect"        "$T"
 
 # | L5 | LIST wildcard %
@@ -111,7 +111,7 @@ run_test "9  STORE +FLAGS Seen: FETCH reply"  "FETCH"           "$T"
 run_test "9b STORE +FLAGS Seen: flag present" "Seen"            "$T"
 
 # Verify Maildir rename happened on disk
-MAILDIR="$(dirname "$0")/../maildir/testuser/INBOX"
+MAILDIR="$(dirname "$0")/../maildir/$USER/INBOX"
 SEEN_FILE=$(ls "$MAILDIR" | grep "F=[^,.]*S" 2>/dev/null | head -1)
 if [ -n "$SEEN_FILE" ]; then
     echo "PASS  9c STORE: Maildir filename has F=...S... suffix ($SEEN_FILE)"
@@ -231,10 +231,13 @@ run_test "12  LOGOUT BYE"                     "BYE"             "$T"
 # ---------------------------------------------------------------------------
 # SMTP tests
 # ---------------------------------------------------------------------------
-SMTP_USER="smtpuser@localhost"
+# Single-account model: SMTP delivers into the same mailbox the IMAP tests
+# used. Clear INBOX so the SMTP count assertions (1 EXISTS, then 2) start clean.
+SMTP_USER="$USER"
 SMTP_FROM="sender@example.com"
 SMTP_SUBJECT="SMTP test message"
 SMTP_BODY="Hello from the SMTP test suite."
+rm -f "$(dirname "$0")/../maildir/$USER/INBOX/"*.eml
 
 smtp_send() {
     local from="$1" rcpt="$2" subject="$3" body="$4"
@@ -264,27 +267,27 @@ else
 fi
 
 # | S2 | IMAP SELECT sees the delivered message
-T=$(nc_send $"a1 LOGIN $SMTP_USER x\r\na2 SELECT INBOX\r\na3 LOGOUT\r\n")
+T=$(nc_send $"a1 LOGIN $SMTP_USER $PASS\r\na2 SELECT INBOX\r\na3 LOGOUT\r\n")
 run_test "S2  SMTP→IMAP: EXISTS > 0"          "1 EXISTS"        "$T"
 run_test "S2b SMTP→IMAP: RECENT > 0"          "1 RECENT"        "$T"
 
 # | S3 | IMAP SEARCH finds the message
-T=$(nc_send $"a1 LOGIN $SMTP_USER x\r\na2 SELECT INBOX\r\na3 SEARCH ALL\r\na4 LOGOUT\r\n")
+T=$(nc_send $"a1 LOGIN $SMTP_USER $PASS\r\na2 SELECT INBOX\r\na3 SEARCH ALL\r\na4 LOGOUT\r\n")
 run_test "S3  SMTP→IMAP: SEARCH ALL returns 1" "SEARCH 1"       "$T"
 
 # | S4 | IMAP FETCH returns the correct subject
-T=$(nc_send $"a1 LOGIN $SMTP_USER x\r\na2 SELECT INBOX\r\na3 FETCH 1 BODY[]\r\na4 LOGOUT\r\n")
+T=$(nc_send $"a1 LOGIN $SMTP_USER $PASS\r\na2 SELECT INBOX\r\na3 FETCH 1 BODY[]\r\na4 LOGOUT\r\n")
 run_test "S4  SMTP→IMAP: FETCH has subject"    "$SMTP_SUBJECT"  "$T"
 run_test "S4b SMTP→IMAP: FETCH has body"       "$SMTP_BODY"     "$T"
 run_test "S4c SMTP→IMAP: FETCH has From"       "$SMTP_FROM"     "$T"
 
 # | S5 | Send a second message, check EXISTS updates
 smtp_send "$SMTP_FROM" "$SMTP_USER" "Second message" "Body 2." >/dev/null
-T=$(nc_send $"a1 LOGIN $SMTP_USER x\r\na2 SELECT INBOX\r\na3 LOGOUT\r\n")
+T=$(nc_send $"a1 LOGIN $SMTP_USER $PASS\r\na2 SELECT INBOX\r\na3 LOGOUT\r\n")
 run_test "S5  SMTP: second message → 2 EXISTS" "2 EXISTS"       "$T"
 
 # | S6 | UID FETCH via curl — check From (present in all delivered messages)
-T=$(curl -s -u "$SMTP_USER:anypass" "imap://localhost:143/INBOX/;UID=1" 2>&1)
+T=$(curl -s -u "$SMTP_USER:$PASS" "imap://localhost:143/INBOX/;UID=1" 2>&1)
 run_test "S6  UID FETCH via curl"              "$SMTP_FROM"     "$T"
 
 # ---------------------------------------------------------------------------
