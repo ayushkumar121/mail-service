@@ -1,5 +1,8 @@
 #!/usr/bin/env bash
-set -euo pipefail
+set -euxo pipefail
+
+git fetch --depth 1 origin main
+git reset --hard origin/main
 
 apt update
 apt install -y build-essential git jq curl cron

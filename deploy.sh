@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-set -euo pipefail
+set -euxo pipefail
 cd /opt/mail-service
 git fetch --depth 1 origin main
 git reset --hard origin/main
