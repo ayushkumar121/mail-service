@@ -5,4 +5,4 @@ git fetch --depth 1 origin main
 git reset --hard origin/main
 make
 systemctl restart mail-service
-echo "deployed"
+systemctl status mail-service
