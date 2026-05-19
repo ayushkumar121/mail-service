@@ -42,7 +42,7 @@ void http_headers_set(HashTable *headers, String key, String value) {
   if (hash_table_get(headers, key_ptr, (void **)&out)) {
     array_append(out, value);
   } else {
-    HeaderValues *values = malloc(sizeof(HeaderValues));
+    HeaderValues *values = calloc(1, sizeof(HeaderValues));
     array_append(values, value);
     hash_table_set(headers, key_ptr, values);
   }

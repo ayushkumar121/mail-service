@@ -1,6 +1,6 @@
 MAIN=mail-service
 CC=cc
-CFLAGS=-Wall -g -D_GNU_SOURCE
+CFLAGS=-std=c11 -Wall -g -D_GNU_SOURCE
 LIBS= -lresolv -lm
 LDFLAGS= -rdynamic
 
