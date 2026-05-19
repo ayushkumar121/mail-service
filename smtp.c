@@ -1,6 +1,7 @@
 #define LOG_PREFIX "smtp: "
 #include "smtp.h"
 #include "maildir.h"
+#include "metrics.h"
 
 #include <errno.h>
 #include <resolv.h>
@@ -189,6 +190,9 @@ static void* handle_client(void* p) {
     const int client_fd = (int)(intptr_t)p;
     BufIO bio = {.fd = client_fd};
 
+    atomic_fetch_add(&smtp_connections_total, 1);
+    atomic_fetch_add(&smtp_connections_active, 1);
+
     SmtpSessionState state = SMTP_STATE_CONNECTED;
     String mail_from = StringNil;
     String rcpt_to = StringNil;
@@ -239,6 +243,7 @@ static void* handle_client(void* p) {
 
             String body = sv_clone(sb_to_sv(&bio.read_buf));
             body.length -= strlen(CRLF "." CRLF);
+            atomic_fetch_add(&mail_received_total, 1);
 
             String rcpt_domain = sv_split_delim(rcpt_to, '@').second;
             bool is_local = sv_equal_ignore_case(rcpt_domain, get_local_domain())
@@ -256,17 +261,27 @@ static void* handle_client(void* p) {
                     sv_to_tmp_c(random_id(RANDOM_ID_LEN)),
                     SV_Arg(sender_host),
                     uid);
-                write_entire_file(filename.data, body);
-                INFO("saved " SV_Fmt " (%zu bytes) for " SV_Fmt,
-                     SV_Arg(filename), body.length, SV_Arg(rcpt_to));
-                bufio_send_line(&bio, SV("250 OK queued"));
+                Error werr = write_entire_file(filename.data, body);
+                if (has_error(werr)) {
+                    atomic_fetch_add(&mail_failures_maildir_write, 1);
+                    ERROR("maildir write failed for " SV_Fmt ": " SV_Fmt,
+                          SV_Arg(rcpt_to), SV_Arg(werr.message));
+                    bufio_send_line(&bio, SV("451 local delivery failed; try later"));
+                } else {
+                    atomic_fetch_add(&mail_delivered_local_total, 1);
+                    INFO("saved " SV_Fmt " (%zu bytes) for " SV_Fmt,
+                         SV_Arg(filename), body.length, SV_Arg(rcpt_to));
+                    bufio_send_line(&bio, SV("250 OK queued"));
+                }
             } else {
                 INFO("delivering to " SV_Fmt " from " SV_Fmt, SV_Arg(rcpt_to), SV_Arg(mail_from));
                 Error rerr = smtp_deliver(mail_from, rcpt_to, body);
                 if (has_error(rerr)) {
+                    atomic_fetch_add(&mail_failures_relay, 1);
                     ERROR("delivery failed: " SV_Fmt, SV_Arg(rerr.message));
                     bufio_send_line(&bio, SV("451 delivery failed; try later"));
                 } else {
+                    atomic_fetch_add(&mail_sent_total, 1);
                     bufio_send_line(&bio, SV("250 OK delivered"));
                 }
             }
@@ -286,6 +301,7 @@ static void* handle_client(void* p) {
     safe_free(mail_from.data);
     safe_free(rcpt_to.data);
     safe_free(ehlo_host.data);
+    atomic_fetch_sub(&smtp_connections_active, 1);
     bufio_close(&bio);
     return NULL;
 }

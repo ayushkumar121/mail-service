@@ -4,7 +4,7 @@ CFLAGS=-std=c11 -Wall -g -D_GNU_SOURCE
 LIBS= -lresolv -lm
 LDFLAGS= -rdynamic
 
-OBJS=http.o basic.o config.o maildir.o smtp.o imap.o
+OBJS=http.o basic.o config.o maildir.o smtp.o imap.o handlers.o metrics.o
 
 $(MAIN): $(MAIN).c $(OBJS)
 	$(CC) -o $@ $^ $(CFLAGS) $(LDFLAGS) $(LIBS)

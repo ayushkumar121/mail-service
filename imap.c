@@ -12,6 +12,7 @@
 
 #include "config.h"
 #include "maildir.h"
+#include "metrics.h"
 
 #define IMAP_SOCKET_BACKLOG 1024
 #define IMAP_DEFAULT_PORT 143
@@ -78,6 +79,7 @@ Error handle_login(BufIO* bio, ImapSession* session, String tag, String args) {
     StringPair pair = sv_split_delim(args, ' ');
     session->user = sv_clone(strip_quotes(sv_trim(pair.first)));
     session->state = IMAP_STATE_AUTHENTICATED;
+    atomic_fetch_add(&imap_logins_total, 1);
     return bufio_send_line(bio, tprintf(SV_Fmt " OK LOGIN completed", SV_Arg(tag)));
 }
 
@@ -1109,6 +1111,9 @@ static void* handle_client(void* p) {
     BufIO bio = {.fd = client_fd};
     ImapSession session = {.state = IMAP_STATE_NOT_AUTHENTICATED};
 
+    atomic_fetch_add(&imap_connections_total, 1);
+    atomic_fetch_add(&imap_connections_active, 1);
+
     bufio_send_line(&bio, SV("* OK [CAPABILITY " IMAP_CAPABILITY "] IMAP server ready"));
 
     while (session.state != IMAP_STATE_LOGOUT) {
@@ -1156,8 +1161,10 @@ static void* handle_client(void* p) {
         } else if (sv_equal_ignore_case(cmd, SV("STATUS"))) {
             handle_status(&bio, &session, tag, args);
         } else if (sv_equal_ignore_case(cmd, SV("SEARCH"))) {
+            atomic_fetch_add(&imap_search_total, 1);
             handle_search(&bio, &session, tag);
         } else if (sv_equal_ignore_case(cmd, SV("FETCH"))) {
+            atomic_fetch_add(&imap_fetch_total, 1);
             handle_fetch(&bio, &session, tag, args);
         } else if (sv_equal_ignore_case(cmd, SV("STORE"))) {
             handle_store(&bio, &session, tag, args);
@@ -1173,8 +1180,10 @@ static void* handle_client(void* p) {
             String uid_cmd  = sv_trim(uid_cmd_args.first);
             String uid_args = sv_trim(uid_cmd_args.second);
             if (sv_equal_ignore_case(uid_cmd, SV("FETCH"))) {
+                atomic_fetch_add(&imap_fetch_total, 1);
                 handle_fetch_ex(&bio, &session, tag, uid_args, true);
             } else if (sv_equal_ignore_case(uid_cmd, SV("SEARCH"))) {
+                atomic_fetch_add(&imap_search_total, 1);
                 handle_search(&bio, &session, tag);
             } else if (sv_equal_ignore_case(uid_cmd, SV("STORE"))) {
                 handle_store_ex(&bio, &session, tag, uid_args, true);
@@ -1198,6 +1207,7 @@ static void* handle_client(void* p) {
 
     safe_free(session.user.data);
     safe_free(session.selected_mailbox.data);
+    atomic_fetch_sub(&imap_connections_active, 1);
     bufio_close(&bio);
     return NULL;
 }

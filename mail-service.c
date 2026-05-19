@@ -8,11 +8,14 @@
 
 #include "basic.h"
 #include "config.h"
+#include "http.h"
+#include "handlers.h"
 #include "imap.h"
 #include "smtp.h"
 
 static SmtpServer smtp_server;
 static ImapServer imap_server;
+static HttpServer http_server;
 
 static void *smtp_thread(void* arg) {
     try(smtp_server_listen((SmtpServer*)arg));
@@ -21,6 +24,11 @@ static void *smtp_thread(void* arg) {
 
 static void *imap_thread(void* arg) {
     try(imap_server_listen((ImapServer*)arg));
+    return NULL;
+}
+
+static void *http_thread(void* arg) {
+    try(http_server_listen((HttpServer*)arg, http_handler));
     return NULL;
 }
 
@@ -59,8 +67,12 @@ int main(int argc, char** argv) {
     pthread_t imap_tid;
     pthread_create(&imap_tid, NULL, imap_thread, &imap_server);
 
+    pthread_t http_tid;
+    pthread_create(&http_tid, NULL, http_thread, &http_server);
+
     pthread_join(smtp_tid, NULL);
     pthread_join(imap_tid, NULL);
+    pthread_join(http_tid, NULL);
 
     CRITICAL("unexpected shutdown");
 }
