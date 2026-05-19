@@ -60,6 +60,7 @@ int main(int argc, char** argv) {
 
     try(smtp_server_init(&smtp_server));
     try(imap_server_init(&imap_server));
+    try(http_server_init(&http_server));
 
     pthread_t smtp_tid;
     pthread_create(&smtp_tid, NULL, smtp_thread, &smtp_server);
