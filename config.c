@@ -21,8 +21,6 @@ Error config_load(const char *path) {
   }
 
   INFO("config loaded successfully");
-  json_print(stderr, *config, 4);
-
   return ErrorNil;
 }
 
