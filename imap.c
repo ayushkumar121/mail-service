@@ -74,10 +74,39 @@ static String strip_quotes(String s) {
     return s;
 }
 
+// Length-checked, data-independent comparison to avoid leaking the password
+// via early-exit timing differences.
+static bool sv_equal_constant_time(String a, String b) {
+    if (a.length != b.length) return false;
+    unsigned char diff = 0;
+    for (size_t i = 0; i < a.length; i++) {
+        diff |= (unsigned char)a.data[i] ^ (unsigned char)b.data[i];
+    }
+    return diff == 0;
+}
+
 Error handle_login(BufIO* bio, ImapSession* session, String tag, String args) {
-    // TODO: real password check
     StringPair pair = sv_split_delim(args, ' ');
-    session->user = sv_clone(strip_quotes(sv_trim(pair.first)));
+    String user = strip_quotes(sv_trim(pair.first));
+    String pass = strip_quotes(sv_trim(pair.second));
+
+    String want_user = get_auth_username();
+    String want_pass = get_auth_password();
+
+    // Empty configured credentials = misconfiguration; deny all logins.
+    if (want_user.length == 0 || want_pass.length == 0) {
+        return bufio_send_line(bio, tprintf(SV_Fmt " NO LOGIN failed: invalid credentials", SV_Arg(tag)));
+    }
+
+    // Non-short-circuit (& not &&) so the password compare always runs,
+    // keeping total time independent of whether the username matched.
+    bool ok = (int)sv_equal_ignore_case(user, want_user)
+            & (int)sv_equal_constant_time(pass, want_pass);
+    if (!ok) {
+        return bufio_send_line(bio, tprintf(SV_Fmt " NO LOGIN failed: invalid credentials", SV_Arg(tag)));
+    }
+
+    session->user = sv_clone(user);
     session->state = IMAP_STATE_AUTHENTICATED;
     atomic_fetch_add(&imap_logins_total, 1);
     return bufio_send_line(bio, tprintf(SV_Fmt " OK LOGIN completed", SV_Arg(tag)));
@@ -1131,6 +1160,16 @@ static void* handle_client(void* p) {
         const String args = sv_trim(cmd_args.second);
 
         INFO("Command received: " SV_Fmt, SV_Arg(line));
+
+        bool preauth_ok = sv_equal_ignore_case(cmd, SV("CAPABILITY"))
+                       || sv_equal_ignore_case(cmd, SV("NOOP"))
+                       || sv_equal_ignore_case(cmd, SV("LOGOUT"))
+                       || sv_equal_ignore_case(cmd, SV("LOGIN"));
+        if (session.state == IMAP_STATE_NOT_AUTHENTICATED && !preauth_ok) {
+            bufio_send_line(&bio, tprintf(SV_Fmt " NO authenticate first", SV_Arg(tag)));
+            treset();
+            continue;
+        }
 
         if (sv_equal_ignore_case(cmd, SV("CAPABILITY"))) {
             handle_capability(&bio, tag);

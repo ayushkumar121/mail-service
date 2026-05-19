@@ -77,3 +77,19 @@ String get_maildir(void) {
   }
   return maildir;
 }
+
+String get_auth_username(void) {
+  static String username;
+  if (username.length == 0) {
+    username = config_get_string(SV("auth.username"), StringNil);
+  }
+  return username;
+}
+
+String get_auth_password(void) {
+  static String password;
+  if (password.length == 0) {
+    password = config_get_string(SV("auth.password"), StringNil);
+  }
+  return password;
+}

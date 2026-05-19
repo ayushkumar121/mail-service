@@ -6,5 +6,9 @@
     "smtp": { "port": 25 },
     "imap": { "port": 143 },
     "http": { "port": 8080 }
+  },
+  "auth": {
+    "username": "me@ayush-kumar.com",
+    "password": "password"
   }
 }

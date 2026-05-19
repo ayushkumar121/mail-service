@@ -13,4 +13,7 @@ String get_hostname(void);      // server.host — FQDN we advertise (EHLO/banne
 String get_local_domain(void);  // server.local_domain — @domain we accept as local
 String get_maildir(void);
 
+String get_auth_username(void);  // auth.username — the single account we authenticate
+String get_auth_password(void);  // auth.password — plaintext password for that account
+
 #endif
