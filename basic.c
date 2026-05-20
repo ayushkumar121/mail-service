@@ -1223,10 +1223,6 @@ Error bufio_read_line(BufIO* bio) {
     return bufio_read_until(bio, "\n");
 }
 
-Error bufio_read_crlf(BufIO* bio) {
-    return bufio_read_until(bio, "\r\n");
-}
-
 Error bufio_read_all(BufIO* bio) {
     bio->read_buf.length = 0;
     char buf[512];

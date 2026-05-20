@@ -271,7 +271,6 @@ typedef struct {
 Error bufio_read_until(BufIO* bio, const char* terminator);
 Error bufio_read_n(BufIO* bio, size_t n);
 Error bufio_read_line(BufIO* bio);
-Error bufio_read_crlf(BufIO* bio);
 Error bufio_read_all(BufIO* bio);
 // Append to the internal write buffer without flushing. Must be paired with bufio_flush.
 void  bufio_write(BufIO* bio, String data);
