@@ -1,5 +1,6 @@
 #define LOG_PREFIX "imap: "
 #include "imap.h"
+#include "bufio.h"
 
 #include <pthread.h>
 #include <unistd.h>
@@ -881,11 +882,13 @@ static Error handle_append(BufIO* bio, const ImapSession* session, String tag_in
     Error err = bufio_send_line(bio, SV("+ Ready for literal data"));
     if (has_error(err)) return err;
 
-    err = bufio_read_n(bio, (size_t)size);
-    if (has_error(err)) return err;
-    String body = sv_clone(sb_to_sv(&bio->read_buf));
-    err = bufio_read_until(bio, CRLF);
-    if (has_error(err)) { safe_free(body.data); return err; }
+    StringBuilder body_sb = {0};
+    err = bufio_read_n_into(bio, (size_t)size, &body_sb);
+    if (has_error(err)) { sb_free(&body_sb); return err; }
+    String body = sb_to_sv(&body_sb);
+    String trailing;
+    err = bufio_read_until(bio, CRLF, &trailing);
+    if (has_error(err)) { sb_free(&body_sb); return err; }
 
     String host = get_hostname();
     int uid = next_uid(dir_path.data);
@@ -896,12 +899,12 @@ static Error handle_append(BufIO* bio, const ImapSession* session, String tag_in
 
     err = write_entire_file(filename.data, body);
     if (has_error(err)) {
-        safe_free(body.data);
+        sb_free(&body_sb);
         return bufio_send_line(bio, tprintf(SV_Fmt " NO failed to write message", SV_Arg(tag)));
     }
     INFO("APPEND saved " SV_Fmt " (%zu bytes) uid=%d",
          SV_Arg(filename), body.length, uid);
-    safe_free(body.data);
+    sb_free(&body_sb);
     return bufio_send_line(bio, tprintf(SV_Fmt " OK [APPENDUID %d %d] APPEND completed",
                                         SV_Arg(tag), get_uidvalidity(dir_path.data), uid));
 }
@@ -1150,13 +1153,15 @@ static void* handle_client(void* p) {
     bufio_send_line(&bio, SV("* OK [CAPABILITY " IMAP_CAPABILITY "] IMAP server ready"));
 
     while (session.state != IMAP_STATE_LOGOUT) {
-        Error err = bufio_read_until(&bio, CRLF);
+        String raw_line;
+        Error err = bufio_read_until(&bio, CRLF, &raw_line);
+        if (bufio_is_eof(err)) break;
         if (has_error(err)) {
             ERROR("read failed: " SV_Fmt, SV_Arg(err.message));
             break;
         }
 
-        const String line = sv_trim(sb_to_sv(&bio.read_buf));
+        const String line = sv_trim(raw_line);
         StringPair tag_rest = sv_split_delim(line, ' ');
         const String tag  = sv_trim(tag_rest.first);
         StringPair cmd_args = sv_split_delim(sv_trim(tag_rest.second), ' ');

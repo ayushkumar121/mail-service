@@ -258,39 +258,6 @@ Error random_bytes(char* buf, size_t n);
 // Allocated in temp buffer should be cloned for long-lived objects
 String random_id(size_t n);
 
-// BUF IO
-typedef struct BufIO BufIO;
-
-typedef ssize_t (*RawRead) (void*, char* buf, size_t n);
-typedef ssize_t (*RawWrite) (void*, const char*, size_t n);
-
-typedef struct BufIO {
-    void* file;
-    StringBuilder read_buf;
-    StringBuilder write_buf;
-    StringBuilder overflow;
-
-    RawRead raw_read;
-    RawWrite raw_write;
-} BufIO;
-
-BufIO bufio_new(void* file, RawRead raw_read, RawWrite raw_write);
-Error bufio_read_until(BufIO* bio, const char* terminator);
-Error bufio_read_n(BufIO* bio, size_t n);
-Error bufio_read_line(BufIO* bio);
-Error bufio_read_all(BufIO* bio);
-// Append to the internal write buffer without flushing. Must be paired with bufio_flush.
-void  bufio_write(BufIO* bio, String data);
-void  bufio_write_line(BufIO* bio, String data);
-Error bufio_flush(BufIO* bio);
-
-// Append + flush in one call. Use for single-shot replies; for batched output,
-// call bufio_write_line repeatedly and finish with bufio_flush (or bufio_send_line).
-Error bufio_send(BufIO* bio, String data);
-Error bufio_send_line(BufIO* bio, String data);
-
-void  bufio_free(BufIO* bio);
-
 // TLS helpers (OpenSSL). Implementations live in basic.c.
 // Forward-declare OpenSSL types so we don't pull <openssl/ssl.h> into every TU.
 typedef struct ssl_st     SSL;

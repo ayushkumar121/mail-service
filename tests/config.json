@@ -3,9 +3,10 @@
     "host": "ayush-kumar.com",
     "local_domain": "ayush-kumar.com",
     "maildir": "maildir",
-    "smtp": { "port": 25 },
-    "imap": { "port": 143 },
-    "http": { "port": 8080 }
+    "smtp": { "port": 2525 },
+    "imap": { "port": 9993 },
+    "http": { "port": 8443 },
+    "tls": { "cert": "cert.pem", "key": "key.pem" }
   },
   "auth": {
     "username": "testuser@ayush-kumar.com",

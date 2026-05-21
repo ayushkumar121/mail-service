@@ -4,7 +4,7 @@ CFLAGS= -std=gnu11 -Wall -g -D_GNU_SOURCE `(pkg-config --cflags openssl)`
 LIBS= -lresolv -lm `(pkg-config --libs openssl)`
 LDFLAGS= -rdynamic -L/opt/homebrew/opt/openssl@3/lib
 
-OBJS=http.o basic.o config.o maildir.o smtp.o imap.o handlers.o metrics.o
+OBJS=http.o basic.o bufio.o config.o maildir.o smtp.o imap.o handlers.o metrics.o
 
 all: $(MAIN)
 

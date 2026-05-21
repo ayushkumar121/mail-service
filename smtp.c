@@ -1,5 +1,6 @@
 #define LOG_PREFIX "smtp: "
 #include "smtp.h"
+#include "bufio.h"
 #include "maildir.h"
 #include "metrics.h"
 
@@ -79,22 +80,24 @@ Error smtp_connect(BufIO* bio, String host, int port) {
 
 // Read a full multi-line SMTP reply. Final line is the one whose 4th byte is
 // space (not dash). bio->read_buf holds the final line on return.
-Error smtp_read_from_server(BufIO* bio) {
+Error smtp_read_from_server(BufIO* bio, String* out_final) {
     for (;;) {
-        Error err = bufio_read_until(bio, CRLF);
+        String line;
+        Error err = bufio_read_until(bio, CRLF, &line);
         if (has_error(err)) return err;
-        String line = sb_to_sv(&bio->read_buf);
         DEBUG("recv: " SV_Fmt, SV_Arg(line));
-        if (line.length >= 4 && line.data[3] == ' ') return ErrorNil;
-        // dash-continuation; loop
+        if (line.length >= 4 && line.data[3] == ' ') {
+            if (out_final) *out_final = line;
+            return ErrorNil;
+        }
     }
 }
 
 Error smtp_expect_response(BufIO* bio, int expected) {
-    Error err = smtp_read_from_server(bio);
+    String response;
+    Error err = smtp_read_from_server(bio, &response);
     if (has_error(err)) return err;
 
-    const String response = sb_to_sv(&bio->read_buf);
     if (response.length < 3) return error("smtp response too short");
 
     char* endptr = NULL;
@@ -102,7 +105,7 @@ Error smtp_expect_response(BufIO* bio, int expected) {
     int code = sv_to_int(code_sv, &endptr);
 
     if (code != expected) {
-        return errorf(SV_Fmt, SV_Arg(bio->read_buf));
+        return errorf(SV_Fmt, SV_Arg(response));
     }
 
     return ErrorNil;
@@ -139,21 +142,18 @@ Error smtp_deliver(String from, String to, String raw_msg) {
     if (has_error(err)) return err;
     err = smtp_expect_response(&bio, 354); if (has_error(err)) return err;
 
-    err = bufio_send(&bio, raw_msg);
-    if (has_error(err)) return err;
-    // Ensure body ended with CRLF before the terminating "." line.
+    bufio_write(&bio, raw_msg);
     if (raw_msg.length < 2 ||
         raw_msg.data[raw_msg.length - 2] != '\r' ||
         raw_msg.data[raw_msg.length - 1] != '\n') {
-        err = bufio_send(&bio, SV("\r\n"));
-        if (has_error(err)) return err;
+        bufio_write(&bio, SV("\r\n"));
     }
     err = bufio_send_line(&bio, SV("."));
     if (has_error(err)) return err;
     err = smtp_expect_response(&bio, 250); if (has_error(err)) return err;
 
     bufio_send_line(&bio, SV("QUIT"));
-    close((int)(intptr_t)bio.file);
+    close((int)(intptr_t)bio.transport);
     bufio_free(&bio);
     sb_free(&mx);
     return ErrorNil;
@@ -198,13 +198,15 @@ static void* handle_client(void* p) {
     INFO("client connected");
 
     while (state != SMTP_STATE_QUIT) {
-        Error err = bufio_read_until(&bio, CRLF);
+        String raw_line;
+        Error err = bufio_read_until(&bio, CRLF, &raw_line);
+        if (bufio_is_eof(err)) break;
         if (has_error(err)) {
             ERROR("recv failed: " SV_Fmt, SV_Arg(err.message));
             break;
         }
 
-        const String line = sv_trim(sb_to_sv(&bio.read_buf));
+        const String line = sv_trim(raw_line);
         StringPair cmd_rest = sv_split_delim(line, ' ');
         const String cmd  = sv_trim(cmd_rest.first);
         const String rest = sv_trim(cmd_rest.second);
@@ -240,8 +242,7 @@ static void* handle_client(void* p) {
             bufio_send_line(&bio, SV("220 2.0.0 Ready to start TLS"));
 
             // Drop any pipelined plaintext bytes (RFC 3207 — SMTP-injection guard).
-            bio.overflow.length = 0;
-            bio.read_buf.length = 0;
+            bufio_reset_read(&bio);
 
             ssl = SSL_new(tls_server_ctx());
             SSL_set_fd(ssl, client_fd);
@@ -253,8 +254,8 @@ static void* handle_client(void* p) {
                 break;
             }
             // Swap the BufIO transport to TLS in place.
-            bio.file     = ssl;
-            bio.raw_read = ssl_raw_read;
+            bio.transport = ssl;
+            bio.raw_read  = ssl_raw_read;
             bio.raw_write = ssl_raw_write;
             tls_active = true;
 
@@ -281,9 +282,10 @@ static void* handle_client(void* p) {
             }
             if (b64.length == 0) {
                 bufio_send_line(&bio, SV("334 "));
-                Error rerr = bufio_read_until(&bio, CRLF);
+                String b64_line;
+                Error rerr = bufio_read_until(&bio, CRLF, &b64_line);
                 if (has_error(rerr)) break;
-                b64 = sv_trim(sb_to_sv(&bio.read_buf));
+                b64 = sv_trim(b64_line);
             }
             String decoded = base64_decode(b64);
             // RFC 4616: authzid \0 authcid \0 passwd  (authzid often empty)
@@ -338,10 +340,11 @@ static void* handle_client(void* p) {
             state = SMTP_STATE_DATA;
             bufio_send_line(&bio, SV("354 Start input, end with <CRLF>.<CRLF>"));
 
-            err = bufio_read_until(&bio, CRLF "." CRLF);
-            if (has_error(err)) break;
+            StringBuilder body_sb = {0};
+            err = bufio_read_until_into(&bio, CRLF "." CRLF, &body_sb);
+            if (has_error(err)) { sb_free(&body_sb); break; }
 
-            String body = sv_clone(sb_to_sv(&bio.read_buf));
+            String body = sb_to_sv(&body_sb);
             body.length -= strlen(CRLF "." CRLF);
             atomic_fetch_add(&mail_received_total, 1);
 
@@ -385,7 +388,7 @@ static void* handle_client(void* p) {
                     bufio_send_line(&bio, SV("250 OK delivered"));
                 }
             }
-            safe_free(body.data);
+            sb_free(&body_sb);
 
         } else if (sv_equal_ignore_case(cmd, SV("QUIT"))) {
             state = SMTP_STATE_QUIT;
