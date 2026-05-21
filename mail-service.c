@@ -6,6 +6,8 @@
 
 #define LOG_PREFIX "main: "
 
+#include <openssl/ssl.h>
+
 #include "basic.h"
 #include "config.h"
 #include "http.h"
@@ -57,6 +59,10 @@ int main(int argc, char** argv) {
     try(config_load(config_path));
 
     INFO("Setting up maildir: "SV_Fmt, SV_Arg(get_maildir()));
+
+    SSL_library_init();
+    OpenSSL_add_all_algorithms();
+    SSL_load_error_strings();
 
     try(smtp_server_init(&smtp_server));
     try(imap_server_init(&imap_server));

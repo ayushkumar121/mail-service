@@ -10,6 +10,8 @@
 #include <time.h>
 #include <unistd.h>
 
+#include <openssl/ssl.h>
+
 #include "config.h"
 
 // For hashtable
@@ -80,6 +82,7 @@ HttpServerInitOptions http_server_init_defaults(void) {
       .header_capacity = HTTP_HEADER_CAPACITY,
   };
 }
+
 Error http_server_init(HttpServer *server) {
   assert(server != NULL);
 
@@ -118,13 +121,13 @@ Error http_server_init(HttpServer *server) {
 
 #define CRLF "\r\n"
 
-void http_response_write(const int client_fd, const char *buffer, const size_t length) {
+void http_response_write(SSL* ssl, const char *buffer, const size_t length) {
   assert(buffer != NULL);
   assert(length > 0);
 
   size_t total_written = 0;
   while (total_written < length) {
-    const ssize_t n = write(client_fd, buffer + total_written, length - total_written);
+    const ssize_t n = SSL_write(ssl, buffer + total_written, length - total_written);
     if (n < 0) {
       if (errno == EAGAIN || errno == EINTR || errno == EWOULDBLOCK) {
         continue;
@@ -170,7 +173,7 @@ String http_request_to_string(const HttpRequest request) {
     SV_Arg(request.method), SV_Arg(request.path), SV_Arg(request.proto));
 }
 
-HttpError http_parse_request(const int client, StringBuilder *sb,
+HttpError http_parse_request(SSL* ssl, StringBuilder *sb,
                              HttpRequest *request) {
   assert(request != NULL);
 
@@ -178,7 +181,7 @@ HttpError http_parse_request(const int client, StringBuilder *sb,
   char *buffer = talloc(HTTP_READ_BUFFER_SIZE); // Temp allocated buffer
 
   while (true) {
-    const ssize_t n = read(client, buffer, HTTP_READ_BUFFER_SIZE);
+    const ssize_t n = SSL_read(ssl, buffer, HTTP_READ_BUFFER_SIZE);
     if (n < 0) {
       if (errno == ECONNRESET) {
         return HttpErrorConnectionReset;
@@ -244,7 +247,7 @@ HttpError http_parse_request(const int client, StringBuilder *sb,
     if (to_read > HTTP_READ_BUFFER_SIZE) {
       to_read = HTTP_READ_BUFFER_SIZE;
     }
-    ssize_t n = read(client, buffer, to_read);
+    ssize_t n = SSL_read(ssl, buffer, to_read);
     if (n < 0) {
       if (errno == ECONNRESET || errno == EPIPE) {
         return HttpErrorConnectionReset;
@@ -340,94 +343,112 @@ void http_response_encode(const HttpResponse *response, StringBuilder *sb) {
 }
 
 typedef struct {
-  int client_fd;
+  SSL* ssl;
   HttpListenCallback callback;
 } ClientThreadArgs;
 
-static void *handle_client(void *arg) {
-  ClientThreadArgs *args = arg;
-  const int client_fd = args->client_fd;
-  const HttpListenCallback callback = args->callback;
-  free(arg);
+static void* handle_client(void* arg) {
+    ClientThreadArgs* args = arg;
 
-  StringBuilder request_sb = {0};
-  StringBuilder response_sb = {0};
+    SSL* ssl = args->ssl;
+    const HttpListenCallback callback = args->callback;
+    free(arg);
 
-  sb_resize(&request_sb, HTTP_READ_BUFFER_SIZE);
-  sb_resize(&response_sb, HTTP_READ_BUFFER_SIZE);
+    StringBuilder request_sb = {0};
+    StringBuilder response_sb = {0};
 
-  while (true) {
-    request_sb.length = 0;
-    response_sb.length = 0;
+    sb_resize(&request_sb, HTTP_READ_BUFFER_SIZE);
+    sb_resize(&response_sb, HTTP_READ_BUFFER_SIZE);
 
-    HttpRequest request = {0};
-    const HttpError err = http_parse_request(client_fd, &request_sb, &request);
-    if (err == HttpErrorEOF || err == HttpErrorConnectionReset) {
-      break;
+    while (true) {
+        request_sb.length = 0;
+        response_sb.length = 0;
+
+        HttpRequest request = {0};
+        const HttpError err = http_parse_request(ssl, &request_sb, &request);
+        if (err == HttpErrorEOF || err == HttpErrorConnectionReset) {
+            break;
+        }
+        if (err != HttpErrorNil) {
+            ERROR("http parse request failed: " SV_Fmt "\n", SV_Arg(http_error_to_string(err)));
+            break;
+        }
+
+        INFO("request received: " SV_Fmt, SV_Arg(http_request_to_string(request)));
+
+        HttpResponse response = callback(&request);
+
+        http_response_encode(&response, &response_sb);
+        http_response_write(ssl, response_sb.data, response_sb.length);
+
+        // Cleanup
+        if (response.free_body_after_use)
+            free(response.body.data);
+        http_headers_free(&response.headers);
+        safe_free(request.request_id.data);
+        treset();
+
+        if (!response.keep_alive) {
+            break;
+        }
     }
-    if (err != HttpErrorNil) {
-      ERROR("http parse request failed: " SV_Fmt "\n", SV_Arg(http_error_to_string(err)));
-      break;
-    }
 
-    INFO("request received: " SV_Fmt, SV_Arg(http_request_to_string(request)));
+    int fd = SSL_get_fd(ssl);
+    SSL_shutdown(ssl);
+    SSL_free(ssl);
+    close(fd);
 
-    HttpResponse response = callback(&request);
-
-    http_response_encode(&response, &response_sb);
-    http_response_write(client_fd, response_sb.data, response_sb.length);
-
-    // Cleanup
-    if (response.free_body_after_use)
-      free(response.body.data);
-    http_headers_free(&response.headers);
-    safe_free(request.request_id.data);
-    treset();
-
-    if (!response.keep_alive) {
-      break;
-    }
-  }
-
-  close(client_fd);
-  sb_free(&request_sb);
-  sb_free(&response_sb);
-  return NULL;
+    sb_free(&request_sb);
+    sb_free(&response_sb);
+    return NULL;
 }
 
-Error http_server_listen(const HttpServer *server, const HttpListenCallback callback) {
-  assert(server != NULL);
-  assert(server->sock_fd > 0);
-  assert(callback != NULL);
+Error http_server_listen(const HttpServer* server, const HttpListenCallback callback) {
+    assert(server != NULL);
+    assert(server->sock_fd > 0);
+    assert(callback != NULL);
 
-  if (listen(server->sock_fd, HTTP_BACKLOG) < 0) {
-    return errorf("listen failed: %s\n", strerror(errno));
-  }
+    SSL_CTX* ctx = tls_server_ctx();
 
-  INFO("server started");
-  while (true) {
-    const int client_fd = accept(server->sock_fd, NULL, NULL);
-    if (client_fd < 0) {
-      ERROR("accept failed: %s\n", strerror(errno));
-      continue;
+    if (listen(server->sock_fd, HTTP_BACKLOG) < 0) {
+        return errorf("listen failed: %s\n", strerror(errno));
     }
 
-    ClientThreadArgs *arg = malloc(sizeof(ClientThreadArgs));
-    arg->client_fd = client_fd;
-    arg->callback = callback;
+    INFO("server started");
+    while (true) {
+        const int client_fd = accept(server->sock_fd, NULL, NULL);
+        if (client_fd < 0) {
+            ERROR("accept failed: %s\n", strerror(errno));
+            continue;
+        }
 
-    pthread_t tid;
-    if (pthread_create(&tid, NULL, handle_client, arg) != 0) {
-      free(arg);
-      close(client_fd);
-      ERROR("pthread_create failed: %s\n", strerror(errno));
-      continue;
+        SSL *ssl = SSL_new(ctx);
+        SSL_set_fd(ssl, client_fd);
+
+        if (SSL_accept(ssl) <= 0) {
+            ERROR("SSL accept failed: %s\n", strerror(errno));
+            SSL_shutdown(ssl);
+            SSL_free(ssl);
+            close(client_fd);
+            continue;
+        }
+
+        ClientThreadArgs* arg = malloc(sizeof(ClientThreadArgs));
+        arg->ssl = ssl;
+        arg->callback = callback;
+
+        pthread_t tid;
+        if (pthread_create(&tid, NULL, handle_client, arg) != 0) {
+            free(arg);
+            close(client_fd);
+            ERROR("pthread_create failed: %s\n", strerror(errno));
+            continue;
+        }
+
+        pthread_detach(tid);
     }
 
-    pthread_detach(tid);
-  }
-
-  assert(false && "unreachable");
+    assert(false && "unreachable");
 }
 
 void http_server_free(const HttpServer *server) { close(server->sock_fd); }

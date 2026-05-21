@@ -5,7 +5,6 @@
 #include <stdbool.h>
 #include <stddef.h>
 #include <stdio.h>
-#include <stdint.h>
 #include <string.h>
 #include <stdlib.h>
 
@@ -256,18 +255,26 @@ Error make_directory(const char* path);
 
 Error random_bytes(char* buf, size_t n);
 
-// Allocated in temp buffer should be cloned for long lived objects
+// Allocated in temp buffer should be cloned for long-lived objects
 String random_id(size_t n);
 
 // BUF IO
+typedef struct BufIO BufIO;
 
-typedef struct {
-  int fd;
-  StringBuilder read_buf;
-  StringBuilder write_buf;
-  StringBuilder overflow;
+typedef ssize_t (*RawRead) (void*, char* buf, size_t n);
+typedef ssize_t (*RawWrite) (void*, const char*, size_t n);
+
+typedef struct BufIO {
+    void* file;
+    StringBuilder read_buf;
+    StringBuilder write_buf;
+    StringBuilder overflow;
+
+    RawRead raw_read;
+    RawWrite raw_write;
 } BufIO;
 
+BufIO bufio_new(void* file, RawRead raw_read, RawWrite raw_write);
 Error bufio_read_until(BufIO* bio, const char* terminator);
 Error bufio_read_n(BufIO* bio, size_t n);
 Error bufio_read_line(BufIO* bio);
@@ -279,15 +286,34 @@ Error bufio_flush(BufIO* bio);
 
 // Append + flush in one call. Use for single-shot replies; for batched output,
 // call bufio_write_line repeatedly and finish with bufio_flush (or bufio_send_line).
-static inline Error bufio_send(BufIO* bio, String data) {
-    bufio_write(bio, data);
-    return bufio_flush(bio);
-}
-static inline Error bufio_send_line(BufIO* bio, String data) {
-    bufio_write_line(bio, data);
-    return bufio_flush(bio);
-}
-void  bufio_close(BufIO* bio);
+Error bufio_send(BufIO* bio, String data);
+Error bufio_send_line(BufIO* bio, String data);
+
+void  bufio_free(BufIO* bio);
+
+// TLS helpers (OpenSSL). Implementations live in basic.c.
+// Forward-declare OpenSSL types so we don't pull <openssl/ssl.h> into every TU.
+typedef struct ssl_st     SSL;
+typedef struct ssl_ctx_st SSL_CTX;
+
+// Process-wide TLS server context. Lazily built on first call; loads cert/key
+// from config keys "server.tls.cert" / "server.tls.key" (defaults: cert.pem / key.pem).
+// Aborts on load failure - the server can't run without certs.
+SSL_CTX* tls_server_ctx(void);
+
+// Adapters for BufIO over an SSL* handle. Pass these to bufio_new.
+ssize_t ssl_raw_read (void* ssl, char* buf, size_t n);
+ssize_t ssl_raw_write(void* ssl, const char* buf, size_t n);
+
+// Adapters for BufIO over a raw fd cast to (void*)(intptr_t)fd.
+ssize_t fd_raw_read (void* fd_as_ptr, char* buf, size_t n);
+ssize_t fd_raw_write(void* fd_as_ptr, const char* buf, size_t n);
+
+// Shutdown + free the SSL object and close the underlying fd in the correct order.
+void tls_session_close(SSL* ssl);
+
+// Base64 (used by SMTP AUTH PLAIN, etc.). Allocated in temp buffer.
+String base64_decode(String src);
 
 // Priority Queue
 #define PQUEUE(T) \

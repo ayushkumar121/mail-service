@@ -3,6 +3,7 @@
 
 #include <pthread.h>
 #include <unistd.h>
+#include <stdint.h>
 
 #include <errno.h>
 #include <dirent.h>
@@ -10,12 +11,15 @@
 #include <sys/socket.h>
 #include <sys/stat.h>
 
+#include <openssl/ssl.h>
+#include <openssl/err.h>
+
 #include "config.h"
 #include "maildir.h"
 #include "metrics.h"
 
 #define IMAP_SOCKET_BACKLOG 1024
-#define IMAP_DEFAULT_PORT 143
+#define IMAP_DEFAULT_PORT 993
 #define CRLF "\r\n"
 #define IMAP_CAPABILITY "IMAP4rev1 UIDPLUS"
 
@@ -1136,8 +1140,8 @@ static Error handle_copy(BufIO* bio, const ImapSession* session, String tag, Str
 }
 
 static void* handle_client(void* p) {
-    int client_fd = (int)(intptr_t)p;
-    BufIO bio = {.fd = client_fd};
+    SSL* ssl = (SSL*)p;
+    BufIO bio = bufio_new(ssl, ssl_raw_read, ssl_raw_write);
     ImapSession session = {.state = IMAP_STATE_NOT_AUTHENTICATED};
 
     atomic_fetch_add(&imap_connections_total, 1);
@@ -1244,10 +1248,11 @@ static void* handle_client(void* p) {
         treset();
     }
 
+    tls_session_close(ssl);
     safe_free(session.user.data);
     safe_free(session.selected_mailbox.data);
     atomic_fetch_sub(&imap_connections_active, 1);
-    bufio_close(&bio);
+    bufio_free(&bio);
     return NULL;
 }
 
@@ -1290,6 +1295,8 @@ Error imap_server_listen(const ImapServer* server) {
     assert(server != NULL);
     assert(server->sock_fd > 0);
 
+    SSL_CTX* ctx = tls_server_ctx();
+
     if (listen(server->sock_fd, IMAP_SOCKET_BACKLOG) < 0) {
         return errorf("listen failed: %s\n", strerror(errno));
     }
@@ -1302,9 +1309,20 @@ Error imap_server_listen(const ImapServer* server) {
             continue;
         }
 
-        pthread_t tid;
-        if (pthread_create(&tid, NULL, handle_client, (void*)(intptr_t)client_fd) != 0) {
+        SSL* ssl = SSL_new(ctx);
+        SSL_set_fd(ssl, client_fd);
+        if (SSL_accept(ssl) <= 0) {
+            ERROR("SSL accept failed");
+            ERR_print_errors_fp(stderr);
+            SSL_shutdown(ssl);
+            SSL_free(ssl);
             close(client_fd);
+            continue;
+        }
+
+        pthread_t tid;
+        if (pthread_create(&tid, NULL, handle_client, ssl) != 0) {
+            tls_session_close(ssl);
             ERROR("pthread_create failed: %s\n", strerror(errno));
             continue;
         }

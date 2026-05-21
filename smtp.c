@@ -3,7 +3,6 @@
 #include "maildir.h"
 #include "metrics.h"
 
-#include <errno.h>
 #include <resolv.h>
 #include <arpa/nameser.h>
 
@@ -14,11 +13,14 @@
 #include <time.h>
 #include <unistd.h>
 
+#include <openssl/ssl.h>
+#include <openssl/err.h>
+
 #include "config.h"
 
 #define CRLF "\r\n"
 
-#define SMTP_DEFAULT_PORT 25
+#define SMTP_DEFAULT_PORT 465
 #define SMTP_SOCKET_BACKLOG 1024
 
 Error smtp_lookup_server(String domain, StringBuilder* host_smtp_server) {
@@ -45,8 +47,6 @@ Error smtp_lookup_server(String domain, StringBuilder* host_smtp_server) {
 }
 
 Error smtp_connect(BufIO* bio, String host, int port) {
-    assert(bio != NULL);
-
     char* host_cstr = sv_to_tmp_c(host);
     char* port_cstr = tprintf("%d", port).data;
 
@@ -59,54 +59,35 @@ Error smtp_connect(BufIO* bio, String host, int port) {
         return errorf("getaddrinfo failed for " SV_Fmt ": %s", SV_Arg(host), strerror(errno));
     }
 
-    bio->fd = socket(res->ai_family, res->ai_socktype, res->ai_protocol);
-    if (bio->fd < 0) {
+    int fd = socket(res->ai_family, res->ai_socktype, res->ai_protocol);
+    if (fd < 0) {
         freeaddrinfo(res);
         return errorf("socket failed: %s", strerror(errno));
     }
 
-    if (connect(bio->fd, res->ai_addr, res->ai_addrlen) < 0) {
+    if (connect(fd, res->ai_addr, res->ai_addrlen) < 0) {
         freeaddrinfo(res);
         return errorf("connect failed to " SV_Fmt ": %d:%s", SV_Arg(host), port, strerror(errno));
     }
 
     DEBUG("Connected to: " SV_Fmt " %d", SV_Arg(host), port);
 
+    *bio = bufio_new((void*)(intptr_t)fd, fd_raw_read, fd_raw_write);
     freeaddrinfo(res);
     return ErrorNil;
 }
 
+// Read a full multi-line SMTP reply. Final line is the one whose 4th byte is
+// space (not dash). bio->read_buf holds the final line on return.
 Error smtp_read_from_server(BufIO* bio) {
-    bio->read_buf.length = 0;
-    char buf[512];
-
-    bool finished = false;
-    size_t scan_offset = 0;
-
-    while (!finished) {
-        const ssize_t n = read(bio->fd, buf, sizeof(buf));
-        if (n < 0) {
-            if (errno == EAGAIN || errno == EWOULDBLOCK) break;
-            return errorf("smtp read failed: %s", strerror(errno));
-        }
-        if (n == 0) return errorf("smtp connection closed");
-        sb_push_sv(&bio->read_buf, SV2(buf, n));
-
-        const String sv = SV2(bio->read_buf.data + scan_offset, bio->read_buf.length - scan_offset);
-        StringPair pair = sv_split_str(sv, CRLF);
-        while (pair.first.length > 0) {
-            const String line = pair.first;
-            if (line.length >= 4 && line.data[3] == ' ') {
-                finished = true;
-                break;
-            }
-            pair = sv_split_str(pair.second, CRLF);
-        }
-        scan_offset += n;
+    for (;;) {
+        Error err = bufio_read_until(bio, CRLF);
+        if (has_error(err)) return err;
+        String line = sb_to_sv(&bio->read_buf);
+        DEBUG("recv: " SV_Fmt, SV_Arg(line));
+        if (line.length >= 4 && line.data[3] == ' ') return ErrorNil;
+        // dash-continuation; loop
     }
-
-    DEBUG("recv: " SV_Fmt, SV_Arg(bio->read_buf));
-    return ErrorNil;
 }
 
 Error smtp_expect_response(BufIO* bio, int expected) {
@@ -172,7 +153,8 @@ Error smtp_deliver(String from, String to, String raw_msg) {
     err = smtp_expect_response(&bio, 250); if (has_error(err)) return err;
 
     bufio_send_line(&bio, SV("QUIT"));
-    bufio_close(&bio);
+    close((int)(intptr_t)bio.file);
+    bufio_free(&bio);
     sb_free(&mx);
     return ErrorNil;
 }
@@ -186,9 +168,27 @@ typedef enum {
     SMTP_STATE_QUIT,
 } SmtpSessionState;
 
+typedef struct {
+    SSL* ssl;
+    int  listen_port;
+} SmtpClientArgs;
+
 static void* handle_client(void* p) {
-    const int client_fd = (int)(intptr_t)p;
-    BufIO bio = {.fd = client_fd};
+    SmtpClientArgs* args = (SmtpClientArgs*)p;
+    SSL* ssl = args->ssl;
+    const int listen_port = args->listen_port;
+    free(args);
+
+    BufIO bio = bufio_new(ssl, ssl_raw_read, ssl_raw_write);
+
+    // Submission ports are where authenticated clients (Thunderbird, etc.) connect
+    // and may relay mail to remote domains. Port 25 (if ever added) is MX-only and
+    // never advertises AUTH nor permits relay.
+    const bool is_submission_port = (listen_port == 465 || listen_port == 587);
+    const bool advertise_auth      = is_submission_port;
+    const bool allow_relay_when_authed = is_submission_port;
+
+    bool authenticated = false;
 
     atomic_fetch_add(&smtp_connections_total, 1);
     atomic_fetch_add(&smtp_connections_active, 1);
@@ -215,11 +215,69 @@ static void* handle_client(void* p) {
         const String cmd  = sv_trim(cmd_rest.first);
         const String rest = sv_trim(cmd_rest.second);
 
-        if (sv_equal_ignore_case(cmd, SV("EHLO")) || sv_equal_ignore_case(cmd, SV("HELO"))) {
+        if (sv_equal_ignore_case(cmd, SV("EHLO"))) {
+            state = SMTP_STATE_GREETED;
+            safe_free(ehlo_host.data);
+            ehlo_host = sv_clone(rest);
+            bufio_write_line(&bio, tprintf("250-" SV_Fmt " greets " SV_Fmt, SV_Arg(get_hostname()), SV_Arg(rest)));
+            bufio_write_line(&bio, SV("250-SIZE 26214400"));
+            bufio_write_line(&bio, SV("250-8BITMIME"));
+            if (advertise_auth) {
+                bufio_write_line(&bio, SV("250 AUTH PLAIN"));
+            } else {
+                bufio_write_line(&bio, SV("250 HELP"));
+            }
+            bufio_flush(&bio);
+
+        } else if (sv_equal_ignore_case(cmd, SV("HELO"))) {
             state = SMTP_STATE_GREETED;
             safe_free(ehlo_host.data);
             ehlo_host = sv_clone(rest);
             bufio_send_line(&bio, tprintf("250 " SV_Fmt " greets " SV_Fmt, SV_Arg(get_hostname()), SV_Arg(rest)));
+
+        } else if (sv_equal_ignore_case(cmd, SV("AUTH"))) {
+            if (!advertise_auth) {
+                bufio_send_line(&bio, SV("503 5.5.1 AUTH not available on this port"));
+                treset();
+                continue;
+            }
+            StringPair mech_arg = sv_split_delim(rest, ' ');
+            String mech = sv_trim(mech_arg.first);
+            String b64  = sv_trim(mech_arg.second);
+            if (!sv_equal_ignore_case(mech, SV("PLAIN"))) {
+                bufio_send_line(&bio, SV("504 5.5.4 Unrecognized authentication type"));
+                treset();
+                continue;
+            }
+            if (b64.length == 0) {
+                bufio_send_line(&bio, SV("334 "));
+                Error rerr = bufio_read_until(&bio, CRLF);
+                if (has_error(rerr)) break;
+                b64 = sv_trim(sb_to_sv(&bio.read_buf));
+            }
+            String decoded = base64_decode(b64);
+            // RFC 4616: authzid \0 authcid \0 passwd  (authzid often empty)
+            String authcid = StringNil, passwd = StringNil;
+            size_t i = 0;
+            while (i < decoded.length && decoded.data[i] != '\0') i++;  // skip authzid
+            if (i < decoded.length) i++;                                 // skip NUL
+            size_t auth_start = i;
+            while (i < decoded.length && decoded.data[i] != '\0') i++;
+            authcid = SV2(decoded.data + auth_start, i - auth_start);
+            if (i < decoded.length) i++;
+            passwd  = SV2(decoded.data + i, decoded.length - i);
+
+            String want_user = get_auth_username();
+            String want_pass = get_auth_password();
+            if (want_user.length > 0 && want_pass.length > 0
+                && sv_equal(authcid, want_user) && sv_equal(passwd, want_pass)) {
+                authenticated = true;
+                INFO("AUTH success: " SV_Fmt, SV_Arg(authcid));
+                bufio_send_line(&bio, SV("235 2.7.0 Authentication successful"));
+            } else {
+                WARN("AUTH failed for user '" SV_Fmt "'", SV_Arg(authcid));
+                bufio_send_line(&bio, SV("535 5.7.8 Authentication credentials invalid"));
+            }
 
         } else if (sv_equal_ignore_case(cmd, SV("MAIL"))) {
             const StringPair pair = sv_split_delim(rest, '<');
@@ -229,7 +287,19 @@ static void* handle_client(void* p) {
 
         } else if (sv_equal_ignore_case(cmd, SV("RCPT"))) {
             const StringPair pair = sv_split_delim(rest, '<');
-            rcpt_to = sv_clone(sv_split_delim(pair.second, '>').first);
+            String addr = sv_split_delim(pair.second, '>').first;
+            String domain = sv_split_delim(addr, '@').second;
+            bool is_local = sv_equal_ignore_case(domain, get_local_domain())
+                         || sv_equal_ignore_case(domain, SV("localhost"));
+            if (!is_local && !(authenticated && allow_relay_when_authed)) {
+                WARN("relay denied: " SV_Fmt " (authed=%d, submission=%d)",
+                     SV_Arg(addr), authenticated, is_submission_port);
+                bufio_send_line(&bio, SV("554 5.7.1 Relay access denied"));
+                treset();
+                continue;
+            }
+            safe_free(rcpt_to.data);
+            rcpt_to = sv_clone(addr);
             state = SMTP_STATE_RCPT_TO;
             // Don't pre-create maildir here — only do it if delivery is local.
             bufio_send_line(&bio, SV("250 OK"));
@@ -298,11 +368,14 @@ static void* handle_client(void* p) {
         treset();
     }
 
+    tls_session_close(ssl);
+
     safe_free(mail_from.data);
     safe_free(rcpt_to.data);
     safe_free(ehlo_host.data);
     atomic_fetch_sub(&smtp_connections_active, 1);
-    bufio_close(&bio);
+    bufio_free(&bio);
+
     return NULL;
 }
 
@@ -345,11 +418,14 @@ Error smtp_server_listen(const SmtpServer* server) {
     assert(server != NULL);
     assert(server->sock_fd > 0);
 
+    SSL_CTX* ctx = tls_server_ctx();
+    const int listen_port = config_get_int(SV("server.smtp.port"), SMTP_DEFAULT_PORT);
+
     if (listen(server->sock_fd, SMTP_SOCKET_BACKLOG) < 0) {
         return errorf("listen failed: %s\n", strerror(errno));
     }
 
-    INFO("server started");
+    INFO("server started on port %d", listen_port);
     while (true) {
         const int client_fd = accept(server->sock_fd, NULL, NULL);
         if (client_fd < 0) {
@@ -357,9 +433,26 @@ Error smtp_server_listen(const SmtpServer* server) {
             continue;
         }
 
-        pthread_t tid;
-        if (pthread_create(&tid, NULL, handle_client, (void*)(intptr_t)client_fd) != 0) {
+        SSL *ssl = SSL_new(ctx);
+        SSL_set_fd(ssl, client_fd);
+
+        if (SSL_accept(ssl) <= 0) {
+            ERROR("SSL accept failed: %s\n", strerror(errno));
+            ERR_print_errors_fp(stderr);
+            SSL_shutdown(ssl);
+            SSL_free(ssl);
             close(client_fd);
+            continue;
+        }
+
+        SmtpClientArgs* args = malloc(sizeof(SmtpClientArgs));
+        args->ssl = ssl;
+        args->listen_port = listen_port;
+
+        pthread_t tid;
+        if (pthread_create(&tid, NULL, handle_client, args) != 0) {
+            free(args);
+            tls_session_close(ssl);
             ERROR("pthread_create failed: %s\n", strerror(errno));
             continue;
         }

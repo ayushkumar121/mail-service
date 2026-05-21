@@ -1,4 +1,5 @@
 #include "./basic.h"
+#include "./config.h"
 
 #include <assert.h>
 #include <ctype.h>
@@ -6,12 +7,16 @@
 #include <limits.h>
 #include <math.h>
 #include <stdarg.h>
+#include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <fcntl.h>
 #include <unistd.h>
 
 #include <sys/stat.h>
+
+#include <openssl/ssl.h>
+#include <openssl/err.h>
 
 // Globals
 _Thread_local size_t temp_allocated = 0;
@@ -1153,6 +1158,14 @@ String random_id(size_t n) {
     return SV2(id, n);
 }
 
+BufIO bufio_new(void* file, RawRead raw_read, RawWrite raw_write) {
+    return (BufIO) {
+        .file = file,
+        .raw_read = raw_read,
+        .raw_write = raw_write,
+    };
+}
+
 Error bufio_read_until(BufIO* bio, const char* terminator) {
     bio->read_buf.length = 0;
 
@@ -1176,7 +1189,7 @@ Error bufio_read_until(BufIO* bio, const char* terminator) {
             break;
         }
 
-        const ssize_t n = read(bio->fd, buf, sizeof(buf));
+        const ssize_t n = bio->raw_read(bio->file, buf, sizeof(buf));
         if (n < 0) {
             if (errno == EAGAIN || errno == EWOULDBLOCK || errno == EINTR) continue;
             return errorf("bufio read failed: %s", strerror(errno));
@@ -1207,7 +1220,7 @@ Error bufio_read_n(BufIO* bio, size_t n) {
         size_t to_read = n - bio->read_buf.length;
         if (to_read > sizeof(buf)) to_read = sizeof(buf);
 
-        const ssize_t read_n = read(bio->fd, buf, to_read);
+        const ssize_t read_n = bio->raw_read(bio->file, buf, to_read);
         if (read_n < 0) {
             if (errno == EAGAIN || errno == EWOULDBLOCK || errno == EINTR) continue;
             return errorf("bufio read failed: %s", strerror(errno));
@@ -1228,7 +1241,7 @@ Error bufio_read_all(BufIO* bio) {
     char buf[512];
 
     while (true) {
-        const ssize_t n = read(bio->fd, buf, sizeof(buf));
+        const ssize_t n = bio->raw_read(bio->file, buf, sizeof(buf));
         if (n < 0) {
             if (errno == EAGAIN || errno == EWOULDBLOCK) break; // no more data
             return errorf("bufio read failed: %s", strerror(errno));
@@ -1253,7 +1266,7 @@ void bufio_write_line(BufIO* bio, String data) {
 Error bufio_flush(BufIO* bio) {
     size_t total_written = 0;
     while (total_written < bio->write_buf.length) {
-        const ssize_t n = write(bio->fd, bio->write_buf.data + total_written,
+        const ssize_t n = bio->raw_write(bio->file, bio->write_buf.data + total_written,
                                 bio->write_buf.length - total_written);
         if (n < 0) {
             if (errno == EAGAIN || errno == EINTR || errno == EWOULDBLOCK) continue;
@@ -1269,10 +1282,146 @@ Error bufio_flush(BufIO* bio) {
     return ErrorNil;
 }
 
-void bufio_close(BufIO* bio) {
+Error bufio_send(BufIO* bio, String data) {
+    bufio_write(bio, data);
+    return bufio_flush(bio);
+}
+Error bufio_send_line(BufIO* bio, String data) {
+    bufio_write_line(bio, data);
+    return bufio_flush(bio);
+}
+
+void bufio_free(BufIO* bio) {
     assert(bio != NULL);
-    close(bio->fd);
     sb_free(&bio->read_buf);
     sb_free(&bio->write_buf);
     sb_free(&bio->overflow);
+}
+
+// ---- TLS / BufIO adapters --------------------------------------------------
+
+ssize_t ssl_raw_read(void* ssl, char* buf, size_t n) {
+    int r = SSL_read((SSL*)ssl, buf, (int)n);
+    if (r <= 0) {
+        int err = SSL_get_error((SSL*)ssl, r);
+        if (err == SSL_ERROR_ZERO_RETURN) return 0;       // peer closed cleanly
+        if (err == SSL_ERROR_WANT_READ || err == SSL_ERROR_WANT_WRITE) {
+            errno = EAGAIN;
+            return -1;
+        }
+        errno = EIO;
+        return -1;
+    }
+    return r;
+}
+
+ssize_t ssl_raw_write(void* ssl, const char* buf, size_t n) {
+    int r = SSL_write((SSL*)ssl, buf, (int)n);
+    if (r <= 0) {
+        int err = SSL_get_error((SSL*)ssl, r);
+        if (err == SSL_ERROR_WANT_READ || err == SSL_ERROR_WANT_WRITE) {
+            errno = EAGAIN;
+            return -1;
+        }
+        errno = EIO;
+        return -1;
+    }
+    return r;
+}
+
+ssize_t fd_raw_read(void* fd_as_ptr, char* buf, size_t n) {
+    return read((int)(intptr_t)fd_as_ptr, buf, n);
+}
+
+ssize_t fd_raw_write(void* fd_as_ptr, const char* buf, size_t n) {
+    return write((int)(intptr_t)fd_as_ptr, buf, n);
+}
+
+void tls_session_close(SSL* ssl) {
+    if (ssl == NULL) return;
+    int fd = SSL_get_fd(ssl);
+    SSL_shutdown(ssl);
+    SSL_free(ssl);
+    if (fd >= 0) close(fd);
+}
+
+static SSL_CTX* g_tls_ctx = NULL;
+
+SSL_CTX* tls_server_ctx(void) {
+    if (g_tls_ctx != NULL) return g_tls_ctx;
+
+    SSL_CTX* ctx = SSL_CTX_new(TLS_server_method());
+    if (ctx == NULL) {
+        CRITICAL("SSL_CTX_new failed");
+        abort();
+    }
+    SSL_CTX_set_min_proto_version(ctx, TLS1_2_VERSION);
+
+    String cert = config_get_string(SV("server.tls.cert"), SV("cert.pem"));
+    String key  = config_get_string(SV("server.tls.key"),  SV("key.pem"));
+
+    // config strings aren't NUL-terminated guarantees; copy to a C string.
+    char cert_path[1024], key_path[1024];
+    snprintf(cert_path, sizeof(cert_path), "%.*s", (int)cert.length, cert.data);
+    snprintf(key_path,  sizeof(key_path),  "%.*s", (int)key.length,  key.data);
+
+    if (SSL_CTX_use_certificate_chain_file(ctx, cert_path) <= 0) {
+        ERR_print_errors_fp(stderr);
+        CRITICAL("failed to load TLS cert %s", cert_path);
+        abort();
+    }
+    if (SSL_CTX_use_PrivateKey_file(ctx, key_path, SSL_FILETYPE_PEM) <= 0) {
+        ERR_print_errors_fp(stderr);
+        CRITICAL("failed to load TLS key %s", key_path);
+        abort();
+    }
+    if (!SSL_CTX_check_private_key(ctx)) {
+        CRITICAL("TLS cert and key do not match");
+        abort();
+    }
+
+    g_tls_ctx = ctx;
+    return ctx;
+}
+
+// ---- Base64 ----------------------------------------------------------------
+
+static const int8_t b64_table[256] = {
+    ['A']= 0,['B']= 1,['C']= 2,['D']= 3,['E']= 4,['F']= 5,['G']= 6,['H']= 7,
+    ['I']= 8,['J']= 9,['K']=10,['L']=11,['M']=12,['N']=13,['O']=14,['P']=15,
+    ['Q']=16,['R']=17,['S']=18,['T']=19,['U']=20,['V']=21,['W']=22,['X']=23,
+    ['Y']=24,['Z']=25,
+    ['a']=26,['b']=27,['c']=28,['d']=29,['e']=30,['f']=31,['g']=32,['h']=33,
+    ['i']=34,['j']=35,['k']=36,['l']=37,['m']=38,['n']=39,['o']=40,['p']=41,
+    ['q']=42,['r']=43,['s']=44,['t']=45,['u']=46,['v']=47,['w']=48,['x']=49,
+    ['y']=50,['z']=51,
+    ['0']=52,['1']=53,['2']=54,['3']=55,['4']=56,['5']=57,['6']=58,['7']=59,
+    ['8']=60,['9']=61,['+']=62,['/']=63,
+};
+
+String base64_decode(String src) {
+    // Strip whitespace length; we'll skip on the fly.
+    size_t max_out = (src.length / 4) * 3 + 3;
+    char* out = talloc(max_out);
+    size_t out_len = 0;
+
+    uint32_t accum = 0;
+    int bits = 0;
+    for (size_t i = 0; i < src.length; i++) {
+        unsigned char c = (unsigned char)src.data[i];
+        if (c == '=' || c == '\r' || c == '\n' || c == ' ' || c == '\t') continue;
+        int v = b64_table[c];
+        if (v == 0 && c != 'A') {
+            // unknown char (b64_table is zero-initialized for non-mapped slots)
+            // 'A' maps to 0 legitimately, everything else with value 0 is invalid.
+            continue;
+        }
+        accum = (accum << 6) | (uint32_t)v;
+        bits += 6;
+        if (bits >= 8) {
+            bits -= 8;
+            out[out_len++] = (char)((accum >> bits) & 0xFF);
+        }
+    }
+    return (String){ .data = out, .length = out_len };
 }
