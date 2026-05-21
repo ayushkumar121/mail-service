@@ -1,7 +1,7 @@
 MAIN=mail-service
 CC=cc
-CFLAGS= -std=gnu11 -Wall -g -D_GNU_SOURCE -I/opt/homebrew/Cellar/openssl@3/3.6.2/include
-LIBS= -lresolv -latomic -lm `(pkg-config --libs openssl)`
+CFLAGS= -std=gnu11 -Wall -g -D_GNU_SOURCE `(pkg-config --cflags openssl)`
+LIBS= -lresolv -lm `(pkg-config --libs openssl)`
 LDFLAGS= -rdynamic -L/opt/homebrew/opt/openssl@3/lib
 
 OBJS=http.o basic.o config.o maildir.o smtp.o imap.o handlers.o metrics.o
