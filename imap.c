@@ -1168,7 +1168,7 @@ static void* handle_client(void* p) {
         const String cmd  = sv_trim(cmd_args.first);
         const String args = sv_trim(cmd_args.second);
 
-        INFO("Command received: " SV_Fmt, SV_Arg(line));
+        DEBUG("command received: " SV_Fmt, SV_Arg(line));
 
         bool preauth_ok = sv_equal_ignore_case(cmd, SV("CAPABILITY"))
                        || sv_equal_ignore_case(cmd, SV("NOOP"))
@@ -1306,7 +1306,7 @@ Error imap_server_listen(const ImapServer* server) {
         return errorf("listen failed: %s\n", strerror(errno));
     }
 
-    INFO("server started");
+    DEBUG("server started");
     while (true) {
         const int client_fd = accept(server->sock_fd, NULL, NULL);
         if (client_fd < 0) {

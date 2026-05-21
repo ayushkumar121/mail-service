@@ -168,14 +168,8 @@ typedef enum {
     SMTP_STATE_QUIT,
 } SmtpSessionState;
 
-typedef struct {
-    int client_fd;
-} SmtpClientArgs;
-
 static void* handle_client(void* p) {
-    SmtpClientArgs* args = (SmtpClientArgs*)p;
-    const int client_fd = args->client_fd;
-    free(args);
+    const int client_fd = (int)(intptr_t)p;
 
     // Start plaintext on connect. STARTTLS may upgrade us mid-session.
     SSL* ssl = NULL;
@@ -472,12 +466,8 @@ Error smtp_server_listen(const SmtpServer* server) {
             continue;
         }
 
-        SmtpClientArgs* args = malloc(sizeof(SmtpClientArgs));
-        args->client_fd = client_fd;
-
         pthread_t tid;
-        if (pthread_create(&tid, NULL, handle_client, args) != 0) {
-            free(args);
+        if (pthread_create(&tid, NULL, handle_client, (void*)(intptr_t)client_fd) != 0) {
             close(client_fd);
             ERROR("pthread_create failed: %s\n", strerror(errno));
             continue;
