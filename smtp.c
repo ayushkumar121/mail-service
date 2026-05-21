@@ -189,7 +189,7 @@ static void* handle_client(void* p) {
     // Greeting
     bufio_send_line(&bio, tprintf("220 " SV_Fmt " ESMTP ready", SV_Arg(get_hostname())));
 
-    INFO("client connected");
+    DEBUG("client connected");
 
     while (state != SMTP_STATE_QUIT) {
         String raw_line;
@@ -458,7 +458,7 @@ Error smtp_server_listen(const SmtpServer* server) {
         return errorf("listen failed: %s\n", strerror(errno));
     }
 
-    INFO("server started on port %d (plaintext + STARTTLS)", listen_port);
+    DEBUG("server started on port %d (plaintext + STARTTLS)", listen_port);
     while (true) {
         const int client_fd = accept(server->sock_fd, NULL, NULL);
         if (client_fd < 0) {

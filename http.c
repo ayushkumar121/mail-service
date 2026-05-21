@@ -418,7 +418,7 @@ Error http_server_listen(const HttpServer* server, const HttpListenCallback call
         return errorf("listen failed: %s\n", strerror(errno));
     }
 
-    INFO("server started");
+    DEBUG("server started");
     while (true) {
         const int client_fd = accept(server->sock_fd, NULL, NULL);
         if (client_fd < 0) {
