@@ -3,8 +3,8 @@
     "host": "mail.ayush-kumar.com",
     "local_domain": "ayush-kumar.com",
     "maildir": "/var/mail-service/maildir",
-    "smtp": { "port": 465 },
-    "imap": { "port": 143 },
+    "smtp": { "port": 25 },
+    "imap": { "port": 993 },
     "http": { "port": 443 }
   },
   "auth": {

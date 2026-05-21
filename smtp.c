@@ -20,7 +20,7 @@
 
 #define CRLF "\r\n"
 
-#define SMTP_DEFAULT_PORT 465
+#define SMTP_DEFAULT_PORT 25
 #define SMTP_SOCKET_BACKLOG 1024
 
 Error smtp_lookup_server(String domain, StringBuilder* host_smtp_server) {
@@ -169,25 +169,19 @@ typedef enum {
 } SmtpSessionState;
 
 typedef struct {
-    SSL* ssl;
-    int  listen_port;
+    int client_fd;
 } SmtpClientArgs;
 
 static void* handle_client(void* p) {
     SmtpClientArgs* args = (SmtpClientArgs*)p;
-    SSL* ssl = args->ssl;
-    const int listen_port = args->listen_port;
+    const int client_fd = args->client_fd;
     free(args);
 
-    BufIO bio = bufio_new(ssl, ssl_raw_read, ssl_raw_write);
+    // Start plaintext on connect. STARTTLS may upgrade us mid-session.
+    SSL* ssl = NULL;
+    BufIO bio = bufio_new((void*)(intptr_t)client_fd, fd_raw_read, fd_raw_write);
 
-    // Submission ports are where authenticated clients (Thunderbird, etc.) connect
-    // and may relay mail to remote domains. Port 25 (if ever added) is MX-only and
-    // never advertises AUTH nor permits relay.
-    const bool is_submission_port = (listen_port == 465 || listen_port == 587);
-    const bool advertise_auth      = is_submission_port;
-    const bool allow_relay_when_authed = is_submission_port;
-
+    bool tls_active    = false;
     bool authenticated = false;
 
     atomic_fetch_add(&smtp_connections_total, 1);
@@ -222,10 +216,11 @@ static void* handle_client(void* p) {
             bufio_write_line(&bio, tprintf("250-" SV_Fmt " greets " SV_Fmt, SV_Arg(get_hostname()), SV_Arg(rest)));
             bufio_write_line(&bio, SV("250-SIZE 26214400"));
             bufio_write_line(&bio, SV("250-8BITMIME"));
-            if (advertise_auth) {
-                bufio_write_line(&bio, SV("250 AUTH PLAIN"));
+            if (!tls_active) {
+                bufio_write_line(&bio, SV("250 STARTTLS"));
             } else {
-                bufio_write_line(&bio, SV("250 HELP"));
+                // After TLS, advertise AUTH so clients (Thunderbird) can authenticate.
+                bufio_write_line(&bio, SV("250 AUTH PLAIN"));
             }
             bufio_flush(&bio);
 
@@ -235,9 +230,44 @@ static void* handle_client(void* p) {
             ehlo_host = sv_clone(rest);
             bufio_send_line(&bio, tprintf("250 " SV_Fmt " greets " SV_Fmt, SV_Arg(get_hostname()), SV_Arg(rest)));
 
+        } else if (sv_equal_ignore_case(cmd, SV("STARTTLS"))) {
+            if (tls_active) {
+                bufio_send_line(&bio, SV("503 5.5.1 TLS already active"));
+                treset();
+                continue;
+            }
+            // Send 220 in the clear and flush BEFORE upgrading.
+            bufio_send_line(&bio, SV("220 2.0.0 Ready to start TLS"));
+
+            // Drop any pipelined plaintext bytes (RFC 3207 — SMTP-injection guard).
+            bio.overflow.length = 0;
+            bio.read_buf.length = 0;
+
+            ssl = SSL_new(tls_server_ctx());
+            SSL_set_fd(ssl, client_fd);
+            if (SSL_accept(ssl) <= 0) {
+                ERROR("STARTTLS handshake failed");
+                ERR_print_errors_fp(stderr);
+                SSL_free(ssl);
+                ssl = NULL;
+                break;
+            }
+            // Swap the BufIO transport to TLS in place.
+            bio.file     = ssl;
+            bio.raw_read = ssl_raw_read;
+            bio.raw_write = ssl_raw_write;
+            tls_active = true;
+
+            // RFC 3207: discard all SMTP state, client must re-EHLO.
+            state = SMTP_STATE_CONNECTED;
+            safe_free(mail_from.data); mail_from = StringNil;
+            safe_free(rcpt_to.data);   rcpt_to   = StringNil;
+            safe_free(ehlo_host.data); ehlo_host = StringNil;
+            authenticated = false;
+
         } else if (sv_equal_ignore_case(cmd, SV("AUTH"))) {
-            if (!advertise_auth) {
-                bufio_send_line(&bio, SV("503 5.5.1 AUTH not available on this port"));
+            if (!tls_active) {
+                bufio_send_line(&bio, SV("530 5.7.0 Must issue STARTTLS first"));
                 treset();
                 continue;
             }
@@ -291,9 +321,9 @@ static void* handle_client(void* p) {
             String domain = sv_split_delim(addr, '@').second;
             bool is_local = sv_equal_ignore_case(domain, get_local_domain())
                          || sv_equal_ignore_case(domain, SV("localhost"));
-            if (!is_local && !(authenticated && allow_relay_when_authed)) {
-                WARN("relay denied: " SV_Fmt " (authed=%d, submission=%d)",
-                     SV_Arg(addr), authenticated, is_submission_port);
+            if (!is_local && !authenticated) {
+                WARN("relay denied: " SV_Fmt " (authed=%d, tls=%d)",
+                     SV_Arg(addr), authenticated, tls_active);
                 bufio_send_line(&bio, SV("554 5.7.1 Relay access denied"));
                 treset();
                 continue;
@@ -368,7 +398,11 @@ static void* handle_client(void* p) {
         treset();
     }
 
-    tls_session_close(ssl);
+    if (ssl != NULL) {
+        tls_session_close(ssl);
+    } else {
+        close(client_fd);
+    }
 
     safe_free(mail_from.data);
     safe_free(rcpt_to.data);
@@ -418,14 +452,17 @@ Error smtp_server_listen(const SmtpServer* server) {
     assert(server != NULL);
     assert(server->sock_fd > 0);
 
-    SSL_CTX* ctx = tls_server_ctx();
+    // Warm up the TLS context now so config errors surface at startup, not on
+    // first STARTTLS upgrade.
+    (void)tls_server_ctx();
+
     const int listen_port = config_get_int(SV("server.smtp.port"), SMTP_DEFAULT_PORT);
 
     if (listen(server->sock_fd, SMTP_SOCKET_BACKLOG) < 0) {
         return errorf("listen failed: %s\n", strerror(errno));
     }
 
-    INFO("server started on port %d", listen_port);
+    INFO("server started on port %d (plaintext + STARTTLS)", listen_port);
     while (true) {
         const int client_fd = accept(server->sock_fd, NULL, NULL);
         if (client_fd < 0) {
@@ -433,26 +470,13 @@ Error smtp_server_listen(const SmtpServer* server) {
             continue;
         }
 
-        SSL *ssl = SSL_new(ctx);
-        SSL_set_fd(ssl, client_fd);
-
-        if (SSL_accept(ssl) <= 0) {
-            ERROR("SSL accept failed: %s\n", strerror(errno));
-            ERR_print_errors_fp(stderr);
-            SSL_shutdown(ssl);
-            SSL_free(ssl);
-            close(client_fd);
-            continue;
-        }
-
         SmtpClientArgs* args = malloc(sizeof(SmtpClientArgs));
-        args->ssl = ssl;
-        args->listen_port = listen_port;
+        args->client_fd = client_fd;
 
         pthread_t tid;
         if (pthread_create(&tid, NULL, handle_client, args) != 0) {
             free(args);
-            tls_session_close(ssl);
+            close(client_fd);
             ERROR("pthread_create failed: %s\n", strerror(errno));
             continue;
         }

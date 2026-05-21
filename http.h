@@ -35,7 +35,7 @@ typedef struct {
 
 typedef HttpResponse (*HttpListenCallback)(const HttpRequest *);
 
-#define HTTP_DEFAULT_PORT 8080
+#define HTTP_DEFAULT_PORT 443
 #define HTTP_BACKLOG 1024
 #define HTTP_HEADER_CAPACITY 20
 #define HTTP_READ_BUFFER_SIZE 512

@@ -8,9 +8,9 @@ apt update
 apt install -y build-essential git jq curl cron pkg-config libssl-dev
 
 ufw allow 22/tcp
-ufw allow 25/tcp
-ufw allow 143/tcp
-ufw allow 8080/tcp
+ufw allow 25/tcp      # SMTP (plaintext + STARTTLS, MX inbound + submission)
+ufw allow 443/tcp     # HTTPS (/metrics)
+ufw allow 993/tcp     # IMAPS (implicit TLS)
 ufw --force enable
 
 cp mail-service.service /etc/systemd/system/mail-service.service
@@ -18,8 +18,6 @@ cp config.json          /etc/mail-service.json
 mkdir -p "$(jq -r '.server.maildir' config.json)"
 
 make
-
-openssl req -x509 -newkey rsa:2048 -keyout key.pem -out cert.pem -days 365 -nodes
 
 mkdir -p /var/log/mail-service
 chmod +x /opt/mail-service/scrape-metrics.sh
