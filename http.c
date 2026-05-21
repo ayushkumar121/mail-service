@@ -374,9 +374,13 @@ static void* handle_client(void* arg) {
             break;
         }
 
-        INFO("request received: " SV_Fmt, SV_Arg(http_request_to_string(request)));
-
         HttpResponse response = callback(&request);
+
+        DEBUG("request: " SV_Fmt, SV_Arg(http_request_to_string(request)));
+        if (response.status_code >= 399) {
+            DEBUG("rejected %d: " SV_Fmt,
+                  response.status_code, SV_Arg(http_request_to_string(request)));
+        }
 
         http_response_encode(&response, &response_sb);
         http_response_write(ssl, response_sb.data, response_sb.length);
