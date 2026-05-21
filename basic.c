@@ -1197,6 +1197,16 @@ ssize_t fd_raw_write(void* fd_as_ptr, const char* buf, size_t n) {
     return write((int)(intptr_t)fd_as_ptr, buf, n);
 }
 
+const char* tls_last_error(void) {
+    unsigned long err = ERR_get_error();
+    if (err == 0) return strerror(errno);
+    // Drain the rest of the queue so the next call gets a clean slate.
+    char buf[256];
+    ERR_error_string_n(err, buf, sizeof(buf));
+    while (ERR_get_error()) {}
+    return tprintf("%s", buf).data;
+}
+
 void tls_session_close(SSL* ssl) {
     if (ssl == NULL) return;
     int fd = SSL_get_fd(ssl);

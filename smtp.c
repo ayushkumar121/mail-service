@@ -247,8 +247,7 @@ static void* handle_client(void* p) {
             ssl = SSL_new(tls_server_ctx());
             SSL_set_fd(ssl, client_fd);
             if (SSL_accept(ssl) <= 0) {
-                ERROR("STARTTLS handshake failed");
-                ERR_print_errors_fp(stderr);
+                INFO("STARTTLS handshake failed: %s", tls_last_error());
                 SSL_free(ssl);
                 ssl = NULL;
                 break;

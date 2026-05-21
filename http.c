@@ -426,7 +426,7 @@ Error http_server_listen(const HttpServer* server, const HttpListenCallback call
         SSL_set_fd(ssl, client_fd);
 
         if (SSL_accept(ssl) <= 0) {
-            ERROR("SSL accept failed: %s\n", strerror(errno));
+            INFO("TLS handshake failed: %s", tls_last_error());
             SSL_shutdown(ssl);
             SSL_free(ssl);
             close(client_fd);

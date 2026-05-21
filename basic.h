@@ -279,6 +279,11 @@ ssize_t fd_raw_write(void* fd_as_ptr, const char* buf, size_t n);
 // Shutdown + free the SSL object and close the underlying fd in the correct order.
 void tls_session_close(SSL* ssl);
 
+// Returns a short human-readable reason for the most recent OpenSSL error in
+// the current thread's error queue, or strerror(errno) if the queue is empty.
+// Result is in a temp buffer; clone if you need it to outlive the next treset.
+const char* tls_last_error(void);
+
 // Base64 (used by SMTP AUTH PLAIN, etc.). Allocated in temp buffer.
 String base64_decode(String src);
 
