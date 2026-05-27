@@ -3,8 +3,6 @@
 
 #include <stdatomic.h>
 
-#include "basic.h"
-
 extern atomic_int mail_received_total;
 extern atomic_int mail_delivered_local_total;
 extern atomic_int mail_sent_total;

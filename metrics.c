@@ -1,10 +1,11 @@
+#define LOG_PREFIX "metrics: "
 #include "metrics.h"
 
 #include <time.h>
 #include <unistd.h>
-#include "config.h"
 
-#define LOG_PREFIX "metrics: "
+#include "basic.h"
+#include "config.h"
 
 atomic_int mail_received_total;
 atomic_int mail_delivered_local_total;
