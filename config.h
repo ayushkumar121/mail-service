@@ -9,11 +9,12 @@ double config_get_double(String key, int default_value);
 int config_get_int(String key, int default_value);
 void config_free(void);
 
-String get_hostname(void);      // server.host — FQDN we advertise (EHLO/banner)
-String get_local_domain(void);  // server.local_domain — @domain we accept as local
+String get_hostname(void);      // server.host
+String get_local_domain(void);  // server.local_domain
 String get_maildir(void);
+String get_logdir(void);
 
-String get_auth_username(void);  // auth.username — the single account we authenticate
-String get_auth_password(void);  // auth.password — plaintext password for that account
+String get_auth_username(void);  // auth.username
+String get_auth_password(void);  // auth.password
 
 #endif

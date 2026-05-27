@@ -76,6 +76,18 @@ String get_maildir(void) {
   return maildir;
 }
 
+String get_logdir(void) {
+  static String logdir;
+  if (logdir.length == 0) {
+    logdir = config_get_string(SV("server.logdir"), SV("logs"));
+  }
+  const char* logdir_cstr = sv_to_tmp_c(logdir);
+  if (!file_exists(logdir_cstr)) {
+    make_directory(logdir_cstr);
+  }
+  return logdir;
+}
+
 String get_auth_username(void) {
   static String username;
   if (username.length == 0) {

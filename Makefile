@@ -1,6 +1,6 @@
 MAIN=mail-service
 CC=cc
-CFLAGS= -std=gnu11 -Wall -g -D_GNU_SOURCE `(pkg-config --cflags openssl)`
+CFLAGS= -std=c11 -Wall -g -D_GNU_SOURCE `(pkg-config --cflags openssl)`
 LIBS= -lresolv -lm `(pkg-config --libs openssl)`
 LDFLAGS= -rdynamic -L/opt/homebrew/opt/openssl@3/lib
 

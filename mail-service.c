@@ -14,23 +14,29 @@
 #include "handlers.h"
 #include "imap.h"
 #include "smtp.h"
+#include "metrics.h"
 
 static SmtpServer smtp_server;
 static ImapServer imap_server;
 static HttpServer http_server;
 
-static void *smtp_thread(void* arg) {
+static void* smtp_thread(void* arg) {
     try(smtp_server_listen((SmtpServer*)arg));
     return NULL;
 }
 
-static void *imap_thread(void* arg) {
+static void* imap_thread(void* arg) {
     try(imap_server_listen((ImapServer*)arg));
     return NULL;
 }
 
-static void *http_thread(void* arg) {
+static void* http_thread(void* arg) {
     try(http_server_listen((HttpServer*)arg, http_handler));
+    return NULL;
+}
+
+static void* logger_thread(void* arg) {
+    metrics_logger(5*60*60);
     return NULL;
 }
 
@@ -76,6 +82,9 @@ int main(int argc, char** argv) {
 
     pthread_t http_tid;
     pthread_create(&http_tid, NULL, http_thread, &http_server);
+
+    pthread_t logger_tid;
+    pthread_create(&logger_tid, NULL, logger_thread, NULL);
 
     pthread_join(smtp_tid, NULL);
     pthread_join(imap_tid, NULL);
