@@ -452,13 +452,11 @@ Error smtp_server_listen(const SmtpServer* server) {
     // first STARTTLS upgrade.
     (void)tls_server_ctx();
 
-    const int listen_port = config_get_int(SV("server.smtp.port"), SMTP_DEFAULT_PORT);
-
     if (listen(server->sock_fd, SMTP_SOCKET_BACKLOG) < 0) {
         return errorf("listen failed: %s\n", strerror(errno));
     }
 
-    DEBUG("server started on port %d (plaintext + STARTTLS)", listen_port);
+    DEBUG("server started on port");
     while (true) {
         const int client_fd = accept(server->sock_fd, NULL, NULL);
         if (client_fd < 0) {

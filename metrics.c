@@ -27,8 +27,6 @@ static void emit_mertic(const char* label, long value) {
 }
 
 static void log_metrics(long timestamp) {
-    INFO("Logging metrics");
-
     sb.length = 0;
     sb_push_str(&sb, "# METRICS_LOG "); sb_push_long(&sb, timestamp); sb_push_char(&sb, '\n');
     emit_mertic("mail_received_total", atomic_load(&mail_received_total));
@@ -45,6 +43,8 @@ static void log_metrics(long timestamp) {
     emit_mertic("imap_search_total", atomic_load(&imap_search_total));
 
     String log_path = tprintf(SV_Fmt"/metrics.log", SV_Arg(get_logdir()));
+    DEBUG("Logging metrics to " SV_Fmt, SV_Arg(log_path));
+
     FILE* f = fopen(log_path.data, "a");
     fwrite(sb.data, sb.length, 1, f);
     fclose(f);
