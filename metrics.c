@@ -24,7 +24,7 @@ static StringBuilder sb = {0};
 
 static void emit_mertic(const char* label, long value) {
     sb_push_str(&sb, label);
-    sb_push_char(&sb, '=');
+    sb_push_char(&sb, ' ');
     sb_push_long(&sb, value);
     sb_push_char(&sb, '\n');
 }
