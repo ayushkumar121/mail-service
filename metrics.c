@@ -4,6 +4,8 @@
 #include <unistd.h>
 #include "config.h"
 
+#define LOG_PREFIX "metrics: "
+
 atomic_int mail_received_total;
 atomic_int mail_delivered_local_total;
 atomic_int mail_sent_total;
@@ -43,7 +45,7 @@ static void log_metrics(long timestamp) {
     emit_mertic("imap_search_total", atomic_load(&imap_search_total));
 
     String log_path = tprintf(SV_Fmt"/metrics.log", SV_Arg(get_logdir()));
-    DEBUG("Logging metrics to " SV_Fmt, SV_Arg(log_path));
+    DEBUG("logging metrics to " SV_Fmt, SV_Arg(log_path));
 
     FILE* f = fopen(log_path.data, "a");
     fwrite(sb.data, sb.length, 1, f);
