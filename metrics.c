@@ -49,14 +49,8 @@ static void log_metrics(long timestamp) {
 }
 
 void metrics_logger(int frequency_seconds) {
-    long last_executed = 0;
-    long current_time = time(NULL);
-
-    while (current_time > last_executed + frequency_seconds) {
-        log_metrics(current_time);
-        
-        current_time = time(NULL);
-        last_executed = current_time;
+    while (1) {
+        log_metrics(time(NULL));
         sleep(frequency_seconds);
     }
 }
