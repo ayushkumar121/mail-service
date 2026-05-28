@@ -45,10 +45,11 @@ static void log_metrics(long timestamp) {
     emit_mertic("imap_fetch_total", atomic_load(&imap_fetch_total));
     emit_mertic("imap_search_total", atomic_load(&imap_search_total));
 
-    String log_path = tprintf(SV_Fmt"/metrics.log", SV_Arg(get_logdir()));
-    DEBUG("logging metrics to " SV_Fmt, SV_Arg(log_path));
+    String metrics_filename = config_get_string(SV("server.metrics.filename"), SV("metrics.log"));
+    String metrics_filepath = tprintf(SV_Fmt"/"SV_Fmt, SV_Arg(get_logdir()), SV_Arg(metrics_filename));
+    DEBUG("logging metrics to " SV_Fmt, SV_Arg(metrics_filepath));
 
-    FILE* f = fopen(log_path.data, "a");
+    FILE* f = fopen(metrics_filepath.data, "a");
     fwrite(sb.data, sb.length, 1, f);
     fclose(f);
 }

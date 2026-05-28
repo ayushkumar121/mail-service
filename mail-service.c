@@ -36,7 +36,7 @@ static void* http_thread(void* arg) {
 }
 
 static void* logger_thread(void* arg) {
-    metrics_logger(5*60*60);
+    metrics_logger(config_get_int(SV("server.metrics.interval"), 60*5));
     return NULL;
 }
 
